@@ -1,7 +1,7 @@
-"""Spec for ``devsquad.agent.loop.run_loop``.
+"""``devsquad.agent.loop.run_loop`` 的规格。
 
-These tests fail until the owner implements the loop. They are marked
-``student`` and ``xfail(strict=False)`` so the default pytest run stays green.
+在作者实现主循环之前，这些测试会失败。它们标了 ``student`` 和
+``xfail(strict=False)``，所以默认的 pytest 仍然是绿的。
 
     pytest -m student --runxfail tests/test_agent_loop.py
 """
