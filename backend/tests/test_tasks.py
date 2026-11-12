@@ -6,6 +6,7 @@ The public create command is ``devsquad run --repo <path> --task "<requirement>"
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -18,6 +19,12 @@ from devsquad.tasks import Task, TaskError, TaskStore, cleanup_task
 from tests.gitutil import git, worktree_fingerprint
 
 runner = CliRunner()
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+
+def _plain(text: str) -> str:
+    """Drop ANSI color so help text can be asserted on CI, where Rich colors output."""
+    return _ANSI.sub("", text)
 
 
 def _text(result) -> str:
@@ -43,10 +50,15 @@ def _run(repo: Path, requirement: str):
 
 
 def test_run_help_uses_task_option() -> None:
-    result = runner.invoke(app, ["run", "--help"])
+    result = runner.invoke(
+        app,
+        ["run", "--help"],
+        env={"NO_COLOR": "1", "TERM": "dumb", "FORCE_COLOR": ""},
+    )
     assert result.exit_code == 0
-    assert "--repo" in result.stdout
-    assert "--task" in result.stdout
+    help_text = _plain(result.stdout)
+    assert "--repo" in help_text
+    assert "--task" in help_text
 
 
 def test_task_new_is_not_a_command(git_repo: Path, cli_env: dict[str, Path]) -> None:
