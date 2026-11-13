@@ -25,6 +25,8 @@ def git_repo(tmp_path: Path) -> Path:
     )
     subprocess.run(["git", "config", "user.name", "DevSquad Test"], cwd=repo, check=True)
     subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=repo, check=True)
+    # Windows runners default to autocrlf, which makes a fresh worktree look dirty.
+    subprocess.run(["git", "config", "core.autocrlf", "false"], cwd=repo, check=True)
     (repo / "README.md").write_text("hello\n", encoding="utf-8")
     subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
     subprocess.run(

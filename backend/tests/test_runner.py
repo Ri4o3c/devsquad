@@ -10,6 +10,7 @@ import pytest
 
 from devsquad.sandbox.pathguard import PathEscapeError
 from devsquad.sandbox.runner import CommandRejected, CommandRunner, minimal_env
+from tests.fsutil import symlink_or_skip
 
 
 @pytest.fixture
@@ -67,7 +68,7 @@ def test_cwd_symlink_escape_is_rejected(worktree: Path, tmp_path: Path) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()
     link = worktree / "out"
-    link.symlink_to(outside, target_is_directory=True)
+    symlink_or_skip(link, outside, target_is_directory=True)
     runner = CommandRunner(worktree, timeout_s=5)
     with pytest.raises(PathEscapeError):
         runner.run([sys.executable, "-c", "print(1)"], cwd=link)
