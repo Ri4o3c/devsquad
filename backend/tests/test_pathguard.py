@@ -6,6 +6,8 @@ vs ``/tmp/wt-evil`` prefix trap, and writes into ``.git``.
 
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -18,6 +20,7 @@ from devsquad.sandbox.pathguard import (
     is_secret_filename,
 )
 from devsquad.tasks import create_task
+from tests.fsutil import symlink_or_skip
 from tests.gitutil import git
 
 
@@ -64,7 +67,7 @@ def test_rejects_write_into_git(worktree: Path, relative: str) -> None:
 
 
 def test_rejects_write_through_a_symlink_to_git(worktree: Path) -> None:
-    (worktree / "gitlink").symlink_to(worktree / ".git")
+    symlink_or_skip(worktree / "gitlink", worktree / ".git")
     guard = PathGuard(worktree)
     with pytest.raises(GitWriteError):
         guard.check_write("gitlink")
@@ -97,8 +100,8 @@ def test_rejects_symlink_that_points_outside_worktree(tmp_path: Path, worktree: 
     outside.mkdir()
     secret = outside / "secret.txt"
     secret.write_text("nope\n", encoding="utf-8")
-    (worktree / "escape").symlink_to(secret)
-    (worktree / "outdir").symlink_to(outside, target_is_directory=True)
+    symlink_or_skip(worktree / "escape", secret)
+    symlink_or_skip(worktree / "outdir", outside, target_is_directory=True)
     guard = PathGuard(worktree)
 
     with pytest.raises(PathEscapeError):
@@ -109,6 +112,39 @@ def test_rejects_symlink_that_points_outside_worktree(tmp_path: Path, worktree: 
         guard.check_write("outdir/pwned.txt")
     with pytest.raises(PathEscapeError):
         guard.check_write(worktree / "escape")
+
+
+def test_rejects_junction_that_points_outside_on_windows(tmp_path: Path, worktree: Path) -> None:
+    if os.name != "nt":
+        pytest.skip("目录联接（junction）是 Windows 的重解析点，其他系统没有")
+    outside = tmp_path / "junction-outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("nope\n", encoding="utf-8")
+    link = worktree / "jdir"
+    completed = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link), str(outside)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0 or not link.exists():
+        detail = (completed.stderr or completed.stdout).strip()
+        pytest.skip(f"当前系统拒绝创建目录联接：{detail}")
+    guard = PathGuard(worktree)
+    with pytest.raises(PathEscapeError):
+        guard.check_read(link / "secret.txt")
+    with pytest.raises(PathEscapeError):
+        guard.check_write(link / "pwned.txt")
+
+
+def test_windows_git_metadata_is_case_insensitive(worktree: Path) -> None:
+    if os.name != "nt":
+        pytest.skip("只有 Windows 把 .GIT 和 .git 当成同一个目录")
+    guard = PathGuard(worktree)
+    with pytest.raises(GitWriteError):
+        guard.check_write(".GIT/config")
+    with pytest.raises(GitWriteError):
+        guard.check_write("src/.Git/HEAD")
 
 
 def test_rejects_sibling_directory_with_shared_prefix(tmp_path: Path) -> None:
@@ -130,7 +166,7 @@ def test_rejects_sibling_directory_with_shared_prefix(tmp_path: Path) -> None:
 def test_allows_symlink_whose_target_stays_inside(worktree: Path) -> None:
     target = worktree / "src" / "app.py"
     link = worktree / "alias.py"
-    link.symlink_to(target)
+    symlink_or_skip(link, target)
     guard = PathGuard(worktree)
     assert guard.check_read("alias.py") == target.resolve()
     assert guard.check_write("alias.py") == target.resolve()
@@ -153,14 +189,14 @@ def test_denies_reading_secret_filenames(worktree: Path, name: str) -> None:
 def test_denies_reading_a_harmless_name_that_links_to_a_secret(worktree: Path) -> None:
     secret = worktree / "id_rsa"
     secret.write_text("key\n", encoding="utf-8")
-    (worktree / "notes.txt").symlink_to(secret)
+    symlink_or_skip(worktree / "notes.txt", secret)
     guard = PathGuard(worktree)
     with pytest.raises(SecretPathError):
         guard.check_read("notes.txt")
 
 
 def test_denies_reading_a_secret_name_that_links_to_a_normal_file(worktree: Path) -> None:
-    (worktree / ".env").symlink_to(worktree / "src" / "app.py")
+    symlink_or_skip(worktree / ".env", worktree / "src" / "app.py")
     guard = PathGuard(worktree)
     with pytest.raises(SecretPathError):
         guard.check_read(".env")

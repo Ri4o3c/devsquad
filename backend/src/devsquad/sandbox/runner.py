@@ -10,7 +10,9 @@ The runner is a baseline, not a container:
 * The child gets an allowlisted environment. Parent API keys and tokens are
   not copied.
 * A timeout and a per-stream output cap are enforced. On timeout the
-  child's process group is killed, not only the direct child.
+  child's process group is killed, not only the direct child. POSIX uses
+  ``killpg`` after ``start_new_session``. Windows uses
+  ``CREATE_NEW_PROCESS_GROUP`` and ``taskkill /F /T``.
 
 TODO(network): deny outbound network for child processes. Do not implement
 this by setting ``HTTP_PROXY`` or ``NO_PROXY``. A program can ignore those
@@ -50,6 +52,11 @@ _ENV_ALLOW = (
     "TMP",
     "USER",
     "LOGNAME",
+    # Windows cannot start most programs without these. They are not secrets.
+    "SYSTEMROOT",
+    "WINDIR",
+    "PATHEXT",
+    "USERPROFILE",
 )
 
 _SECRET_KEY_MARKERS = (
@@ -154,6 +161,13 @@ class CommandRunner:
 
         started = time.monotonic()
         # shell is a literal False. It is not a parameter.
+        # On Windows start_new_session is ignored, so the process group has
+        # to be requested with CREATE_NEW_PROCESS_GROUP instead.
+        popen_kwargs: dict = {"shell": False}
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            popen_kwargs["start_new_session"] = True
         proc = subprocess.Popen(
             argv,
             cwd=cwd_path,
@@ -161,8 +175,7 @@ class CommandRunner:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            shell=False,
-            start_new_session=True,
+            **popen_kwargs,
         )
         stdout_buf = bytearray()
         stderr_buf = bytearray()
@@ -271,10 +284,13 @@ def _stop_process_group(proc: subprocess.Popen) -> None:
     """Kill the child and anything it spawned in its session.
 
     ``Popen.kill`` signals only the direct child. A timeout that left
-    grandchildren running would not be a timeout. ``start_new_session``
-    puts the child in its own process group so the group can be signalled
-    without signalling this process.
+    grandchildren running would not be a timeout. POSIX puts the child in
+    its own session and signals that group. Windows has no ``killpg``;
+    ``taskkill /T`` walks the process tree instead.
     """
+    if os.name == "nt":
+        _stop_windows_tree(proc)
+        return
     try:
         os.killpg(proc.pid, signal.SIGKILL)
     except ProcessLookupError:
@@ -284,3 +300,18 @@ def _stop_process_group(proc: subprocess.Popen) -> None:
             proc.kill()
         except ProcessLookupError:
             return
+
+
+def _stop_windows_tree(proc: subprocess.Popen) -> None:
+    """End ``proc`` and its children. ``taskkill`` is an argument list, not a shell."""
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    subprocess.run(
+        ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+        capture_output=True,
+        check=False,
+        creationflags=flags,
+    )
+    try:
+        proc.kill()
+    except OSError:
+        return

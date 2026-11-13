@@ -96,6 +96,12 @@ pytest -m student --runxfail
 
 接口文件里的 docstring 写了预期行为，测试是规格。
 
+## 第一期在 Windows 上的限制
+
+超时会结束子进程树：POSIX 用进程组信号，Windows 用 `taskkill /F /T`。路径守卫会跟着符号链接和目录联接解析，并按不区分大小写的方式判断是否还在 worktree 里。
+
+创建符号链接本身要系统允许（开发者模式或 `SeCreateSymbolicLinkPrivilege`）。机器拒绝创建时，相关测试会跳过；这不是把 Windows 上的检查关掉。目录联接不需要那个权限。网络隔离仍然是后话，两个系统都还没做。
+
 ## 再往下读
 
 - 隔离工作区为什么这样设计：`docs/adr/0001-worktree-isolation.md`
