@@ -1,7 +1,6 @@
-"""Spec for ``PermissionPolicy.check``.
+"""``PermissionPolicy.check`` 的规格。
 
-Fails until the owner implements the decision table. ``xfail(strict=False)``
-keeps CI green.
+在作者实现决策表之前，这些测试会失败。``xfail(strict=False)`` 让 CI 保持绿色。
 
     pytest -m student --runxfail tests/test_permissions.py
 """
