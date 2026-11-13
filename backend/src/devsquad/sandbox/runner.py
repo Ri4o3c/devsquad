@@ -1,28 +1,10 @@
-"""Run a child process inside a task worktree.
+"""在任务 worktree 中执行子进程。
 
-The runner is a baseline, not a container:
-
-* The command is an argument list. ``shell`` is hard-coded off and there is
-  no parameter that turns it on. A string command is rejected, so ``&&``
-  cannot be composed by accident.
-* ``cwd`` has to pass :class:`~devsquad.sandbox.pathguard.PathGuard` and be
-  an existing directory inside the worktree.
-* The child gets an allowlisted environment. Parent API keys and tokens are
-  not copied.
-* A timeout and a per-stream output cap are enforced. On timeout the
-  child's process group is killed, not only the direct child. POSIX uses
-  ``killpg`` after ``start_new_session``. Windows uses
-  ``CREATE_NEW_PROCESS_GROUP`` and ``taskkill /F /T``.
-
-TODO(network): deny outbound network for child processes. Do not implement
-this by setting ``HTTP_PROXY`` or ``NO_PROXY``. A program can ignore those
-variables and open a socket. A later PR should use an OS facility (Linux
-network namespaces, or a local firewall) and prove that a real ``connect()``
-fails. This module does not pretend the network is closed.
-
-Filesystem isolation has the same shape of gap. The path guard applies to
-``cwd`` and to paths the application checks itself. The child can still
-open an absolute path. Treat that as out of scope for this PR.
+命令只接受 argv，不经过 shell；限制 cwd、环境变量、超时和输出大小。
+默认先拦截明显联网的命令，再在 Linux 可用时使用 user + net namespace。
+Windows、macOS 或 Linux 禁用非特权 userns 时降级为 POLICY_ONLY，
+只有 argv 拦截，不能阻止任意代码打开 socket。可要求强隔离，或显式允许网络。
+不使用代理环境变量冒充禁网。路径守卫也不是子进程的文件系统隔离边界。
 """
 
 from __future__ import annotations
@@ -36,6 +18,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from devsquad.sandbox.network import (
+    NetworkIsolation,
+    network_command_reason,
+    network_namespace_command,
+)
 from devsquad.sandbox.pathguard import PathGuard, SandboxError
 
 # Copied into the child when present. Anything else is dropped, including
@@ -95,6 +82,7 @@ class RunResult:
     timed_out: bool
     truncated: bool
     duration_s: float
+    network: NetworkIsolation = NetworkIsolation.POLICY_ONLY
 
 
 def looks_like_secret_env(key: str) -> bool:
@@ -122,7 +110,11 @@ def minimal_env(source: Mapping[str, str] | None = None) -> dict[str, str]:
 
 
 class CommandRunner:
-    """Execute argument lists with cwd locked to one worktree."""
+    """在 worktree 内执行 argv，默认禁网。
+
+    allow_network 显式允许网络；否则 require_network_isolation 要求 OS 隔离，
+    不支持时拒绝启动。两者同时启用时，以显式允许网络为准。
+    """
 
     def __init__(
         self,
@@ -130,11 +122,15 @@ class CommandRunner:
         *,
         timeout_s: float = DEFAULT_TIMEOUT_S,
         max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
+        allow_network: bool = False,
+        require_network_isolation: bool = False,
     ) -> None:
         if timeout_s <= 0:
             raise ValueError("timeout_s must be positive")
         if max_output_bytes < 1:
             raise ValueError("max_output_bytes must be positive")
+        self.allow_network = allow_network
+        self.require_network_isolation = require_network_isolation
         self.guard = PathGuard(worktree)
         self.timeout_s = float(timeout_s)
         self.max_output_bytes = int(max_output_bytes)
@@ -153,6 +149,19 @@ class CommandRunner:
         shell commands usually sneak in.
         """
         argv = _validate_args(args)
+        network = NetworkIsolation.ALLOWED
+        command = argv
+        if not self.allow_network:
+            reason = network_command_reason(argv)
+            if reason:
+                raise CommandRejected(reason)
+            prefix = network_namespace_command()
+            network = NetworkIsolation.NAMESPACE if prefix else NetworkIsolation.POLICY_ONLY
+            if prefix:
+                # 不传 --fork：unshare 直接 exec，PID 和进程组保持不变。
+                command = [*prefix, *argv]
+            elif self.require_network_isolation:
+                raise CommandRejected("当前环境不支持非特权网络隔离，已拒绝启动子进程")
         timeout = self.timeout_s if timeout_s is None else timeout_s
         if timeout <= 0:
             raise ValueError("timeout_s must be positive")
@@ -169,7 +178,7 @@ class CommandRunner:
         else:
             popen_kwargs["start_new_session"] = True
         proc = subprocess.Popen(
-            argv,
+            command,
             cwd=cwd_path,
             env=env,
             stdin=subprocess.DEVNULL,
@@ -226,6 +235,7 @@ class CommandRunner:
             timed_out=timed_out,
             truncated=truncated.is_set(),
             duration_s=time.monotonic() - started,
+            network=network,
         )
 
     def _cwd(self, cwd: str | Path | None) -> Path:

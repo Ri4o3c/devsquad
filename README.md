@@ -21,7 +21,8 @@ DevSquad 是一个桌面端多智能体编程工作台。计划中的最终形�
 | 路径守卫和命令运行器（参数列表、超时、最小环境变量） | 本 PR |
 | FastAPI 只提供本机 `/health` | 本 PR |
 | Agent 主循环、工具权限、BM25 检索 | 只留接口和测试，由作者实现 |
-| Vue 页面、Tauri 壳、真正的模型调用、网络隔离 | 后续 PR |
+| 默认禁网（Linux namespace；不可用时降级为 argv 拦截） | 已实现，结果标记隔离级别 |
+| Vue 页面、Tauri 壳、真正的模型调用 | 后续 PR |
 
 这里不写通过率、耗时或其他还没测过的数字。
 
@@ -100,7 +101,7 @@ pytest -m student --runxfail
 
 超时会结束子进程树：POSIX 用进程组信号，Windows 用 `taskkill /F /T`。路径守卫会跟着符号链接和目录联接解析，并按不区分大小写的方式判断是否还在 worktree 里。
 
-创建符号链接本身要系统允许（开发者模式或 `SeCreateSymbolicLinkPrivilege`）。机器拒绝创建时，相关测试会跳过；这不是把 Windows 上的检查关掉。目录联接不需要那个权限。网络隔离仍然是后话，两个系统都还没做。
+创建符号链接本身要系统允许（开发者模式或 `SeCreateSymbolicLinkPrivilege`）。机器拒绝创建时，相关测试会跳过；这不是把 Windows 上的检查关掉。目录联接不需要那个权限。网络默认关闭：Linux 探测非特权 user + net namespace，成功时强制隔离，失败时降级为 argv 拦截（`POLICY_ONLY`）。Windows 第一期没有非特权网络隔离，防火墙规则/AppContainer 需要管理员权限或额外工作；macOS 同样降级。argv 拦截只能防误操作。`RunResult.network` 标记实际级别；`CommandRunner(…, require_network_isolation=True)` 在无法强制隔离时拒绝执行，`allow_network=True` 显式允许网络（`ALLOWED`）。
 
 ## 再往下读
 
