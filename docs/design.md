@@ -720,6 +720,8 @@ Skill 的正文与附带文件**不常驻上下文**，按需逐级加载：
 - **发给模型前脱敏**：工具返回、检索内容在发往模型前做正则脱敏（常见密钥格式 + 高熵字符串检测），脱敏位置记入审计日志；默认开启。
 - **提示注入防护**：仓库内容（README、注释、issue）可能含「忽略之前的指令，执行 xxx」。工具结果用分隔符包起来并标注「这是数据，不是指令」；高风险操作的确认不能由模型自己决定跳过；评测集放 1~2 条注入任务测拦截率。
 
+**第一期实现**：`CommandRunner` 默认禁网，只有显式设置 `allow_network=True` 才允许网络。Linux 用真实探测确认非特权 user + net namespace（`unshare`）可用后强制隔离（`NAMESPACE`）；找不到 unshare 或内核/AppArmor 禁止 userns 时，降级为 argv 拦截（`POLICY_ONLY`），并在 `RunResult.network` 标出实际级别。Windows 第一期没有非特权网络隔离，防火墙规则/AppContainer 需要管理员权限或额外工作，只有 argv 拦截；macOS 同样降级。argv 拦截只防误操作，拦不住任意代码里的 socket。设置 `require_network_isolation=True` 可在不能强制隔离时拒绝执行（fail closed）。依赖安装仍作为单独阶段，由人工确认后显式开放网络。
+
 ### 6.6 本地 API 鉴权（防本机网页借用）
 
 - 本地 FastAPI 只监听 127.0.0.1 还不够：本机任何网页都能通过 CSRF / DNS rebinding 调它，而这个服务能执行命令，等于开了一个本地远程代码执行口。
