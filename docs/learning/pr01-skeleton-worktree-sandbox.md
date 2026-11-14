@@ -25,7 +25,7 @@
 │   │   ├── sandbox/
 │   │   │   ├── pathguard.py         # 路径、符号链接、.git、密钥文件名检查
 │   │   │   └── runner.py            # argv 子进程、cwd、环境、超时、输出上限
-│   │   ├── agent/loop.py            # 留给老板实现：Agent 主循环
+│   │   ├── agent/loop.py            # Agent 主循环：编码循环 + 可选 Planner
 │   │   ├── tools/permissions.py     # 留给老板实现：工具权限决策
 │   │   └── retrieval/bm25.py        # 留给老板实现：BM25
 │   └── tests/                       # 已实现功能的测试 + 三份学生规格测试
@@ -48,8 +48,8 @@
 | 路径校验 | 已完成基线。规范化 `..`、解析符号链接、检查目录边界，禁写 `.git`，拦截密钥形状的读取路径。 |
 | 命令运行器 | 已完成基线。只收 argv，固定 `shell=False`，限制 cwd、环境变量、超时和输出大小，超时杀进程组。 |
 | 本地 HTTP 接口 | 已完成且只有 `GET /health`；校验 token、Host、Origin，固定绑定 `127.0.0.1`。 |
-| 执行记录 | 已完成存储 API `TraceRecorder`；尚未接入未实现的 Agent 主循环。 |
-| 三份学生作业 | BM25 已由 PR #4 实现；只剩 `PermissionPolicy.check` 和 `run_loop` 两份作业的核心函数仍抛 `NotImplementedError`。 |
+| 执行记录 | 已完成存储 API `TraceRecorder`；主循环在提供记录器和任务 ID 时记录 `loop.result` 与工具事件，开启规划时另记 `run.plan`。 |
+| 三份学生作业 | BM25 已由 PR #4 实现；`run_loop` 已实现默认编码循环；仅 `PermissionPolicy.check` 的核心函数仍抛 `NotImplementedError`。 |
 | CI | 已完成。Python 3.11 上安装、Ruff、默认 pytest。学生测试用非严格 `xfail` 暂时保持默认套件绿色。 |
 | 前端、桌面壳、评测 | 只有目录说明，没有实现。 |
 
@@ -268,7 +268,7 @@ traces 是未来 Agent 的追加式审计记录：模型轮次、工具调用、
 - `backend/pyproject.toml:37-43`：pytest 只找 `tests`，把项目根和 `src` 加入 `pythonpath`，默认参数 `-ra`，注册 `student` marker。
 - `.github/workflows/ci.yml` 在 main push 和所有 PR 上运行：Ubuntu、Python 3.11、`pip install -e ".[dev]"`、`ruff check .`、`pytest`。
 - `backend/tests/test_no_llm.py:17` 的 `test_package_source_has_no_shell_true_or_model_sdk` 扫描包源码，禁止 `shell=True`、常见模型 SDK import 和模型 API 域名。
-- 三个学生测试文件同时带 `student` 和 `xfail(strict=False)`。默认 `pytest` 中，未实现导致失败属于预期；`--runxfail` 才把它们当普通测试执行。
+- 未实现的学生测试同时带 `student` 和 `xfail(strict=False)`（当前只剩 BM25 与权限两份）。默认 `pytest` 中，未实现导致失败属于预期；`--runxfail` 才把它们当普通测试执行。
 
 **为什么这样设计**
 
@@ -346,7 +346,7 @@ devsquad task cleanup <task-id> --force  # 明确丢弃任务改动
 
 **这条数据流里没有 Agent。** `PathGuard`、`CommandRunner` 是为后续 Agent 工具准备的安全组件；当前 `create_task()` 使用自己的仓库路径检查，并不会顺手调用 `CommandRunner`，`TraceRecorder` 也不会自动记录上述步骤。
 
-## 4. 留给老板实现的三个文件
+## 4. 三份学生作业：BM25、权限策略与主循环
 
 ### 4.0 测试环境与建议顺序
 
@@ -363,17 +363,17 @@ pip install -e ".[dev]"
 
 ```bash
 pytest                              # 已实现功能；学生测试按 xfail 处理
-pytest -m student --runxfail         # 三份作业全部按真实通过/失败执行
+pytest -m student --runxfail         # 未实现作业按真实通过/失败执行
 ruff check .                        # 静态检查
 ```
 
-建议顺序：**`bm25.py` → `permissions.py` → `agent/loop.py`**。
+BM25 已由 PR #4 实现，`run_loop` 也已实现，当前只剩 `PermissionPolicy.check()` 一份作业。阅读顺序仍建议 **`bm25.py` → `permissions.py` → `agent/loop.py`**：
 
 1. BM25 是纯内存算法，先熟悉“docstring + 数值测试就是合同”。
-2. 权限策略复用已经完成的 `PathGuard`，建立 `Decision` 的语义。
-3. 主循环最后做，把步数、费用、消息 transcript、权限和工具分发组合起来。它的测试使用 fake model 和 fake permissions，不依赖真实模型，也不要求 BM25。
+2. 权限策略复用已经完成的 `PathGuard`，建立 `Decision` 的语义，这是当前唯一待实现的作业。
+3. 主循环已把步数、费用、消息 transcript、权限和工具分发组合起来；它的测试使用 fake model 和 fake permissions，不依赖真实模型，也不要求 BM25。
 
-每完成一个文件，先跑对应文件命令；最后跑完整的 `pytest -m student --runxfail`、普通 `pytest` 和 `ruff check .`。
+完成权限作业后先跑对应文件命令；最后跑完整的 `pytest -m student --runxfail`、普通 `pytest` 和 `ruff check .`。
 
 ### 4.1 `backend/src/devsquad/retrieval/bm25.py`
 
@@ -483,7 +483,7 @@ def run_loop(
 ) -> LoopResult: ...
 ```
 
-待实现的是 `run_loop()`（`:64`）。model 是 duck typing：测试替身提供 `peek_cost(messages)` 和 `complete(messages)`；permissions 提供 `check(tool_name, arguments)`。不要 import LLM SDK，也不要联网。
+`run_loop()`（`:69`）已实现：关闭 `planner_enabled` 时直接进入共享编码循环，不调用规划模型、不注入计划、也不记录 `run.plan`；开启时才先规划、注入计划并记录 `run.plan`。model 是 duck typing：测试替身提供 `peek_cost(messages)` 和 `complete(messages)`；permissions 提供 `check(tool_name, arguments)`。不要 import LLM SDK，也不要联网。
 
 **每轮顺序就是验收点**
 
@@ -493,14 +493,13 @@ def run_loop(
 4. 调 `float(model.peek_cost(messages))` 预估下一次费用；若 `spent + upcoming > max_cost_usd`，返回 `cost_limit`，不能执行这次 `complete`。等于预算允许，所以是 `>` 而非 `>=`。
 5. 调 `model.complete(messages)` 后才增加一步并累加实际 `turn.cost_usd`。steps 统计真正完成的模型轮次，不统计 peek 或工具次数。
 6. 没有 `tool_name`：追加 assistant 最终消息；有 `final_text` 则 `completed`，两者都为 None 则 `error`。
-7. 有 `tool_name`：先追加 assistant 工具请求消息，再调用 `permissions.check(name, dict(turn.tool_args or {}))`。
+7. 有 `tool_name`：先追加 assistant 工具请求消息；工具名不在 `tools` 中直接返回 `error`，否则调用 `permissions.check(name, dict(turn.tool_args or {}))`。
    - `DENY`：不执行工具，返回 `denied`。
    - `ASK_HUMAN`：不执行工具，返回 `ask_human`。
-   - `ALLOW` 但 tools 中无此 name：返回 `error`。
-   - `ALLOW` 且工具存在：执行 `tools[name](**args)`，把结果追加为 tool 消息，再进入下一轮。
+   - `ALLOW`：通过 `dispatch_tool(name, args, tools, repo_root)` 执行工具，把结果追加为 tool 消息，再进入下一轮。
    - 其他 decision：返回 `error`。
-8. 工具异常不要捕获，让它向上传播。
-9. `TraceRecorder` 接入是后续增强，本 PR 测试不要求。
+8. 工具执行按沙箱边界处理：`SandboxError` 返回 `denied`，其他异常记录 `tool.error` 后返回 `error`，异常原文不进入 transcript 或 trace。
+9. 提供 `trace_recorder` 和 `task_id` 时记录 `loop.result` 与工具拒绝/错误事件；关闭规划时不记录 `run.plan`。
 
 消息格式不能自行改名：
 
@@ -513,7 +512,7 @@ def run_loop(
 
 可能状态为 `completed`、`step_limit`、`cost_limit`、`denied`、`ask_human`、`error`。denied/ask-human 时，assistant 的工具请求已经在 transcript 中，但工具结果不应存在。
 
-**对应测试**：`backend/tests/test_agent_loop.py`，文件级 marker 在 `:16-22`；fake model 在 `:25`，fake permissions 在 `:43`。
+**对应测试**：`backend/tests/test_agent_loop.py`（已移除学生 xfail marker）；fake model `ScriptedModel` 在 `:16`，fake permissions `FakePermissions` 在 `:34`。
 
 | 测试名 | 验证点 |
 | --- | --- |
@@ -531,19 +530,19 @@ def run_loop(
 运行：
 
 ```bash
-pytest -m student --runxfail tests/test_agent_loop.py
+pytest tests/test_agent_loop.py
 ```
 
 ## 5. 已知遗留项与边界
 
 以下不是“笔记漏看”，而是源码、README 或模块 TODO 明确留下的边界：
 
-1. **Agent 尚未实现或接入。** `run` 只创建工作区；Planner/Coder/Tester/Reviewer、LangGraph 和真实模型调用都是后续工作。
-2. **两份作业仍是 `NotImplementedError`。** BM25 已由 PR #4 实现；默认 pytest 的绿色包含非严格 xfail，不代表 `PermissionPolicy.check` 和 `run_loop` 已经可用。
+1. **Agent 主循环已实现，但尚未接入 `devsquad run`。** `run` 只创建工作区；`run_loop` 已含默认编码循环和可选 Planner，但完整角色编排、LangGraph 和真实模型调用仍是后续工作。
+2. **权限作业仍是 `NotImplementedError`。** BM25 已由 PR #4 实现，`run_loop` 也已实现；默认 pytest 的绿色包含非严格 xfail，不代表 `PermissionPolicy.check` 已经可用。
 3. **没有网络隔离。** `runner.py:15-19` 是明确 TODO；代理环境变量不算隔离。未来需要用 OS 能力，并验证真实 `connect()` 失败。
 4. **没有完整的子进程文件系统隔离。** `PathGuard` 管应用检查过的路径与 cwd，管不住子进程自己打开绝对路径；`shell=False` 也不改变这一点。
 5. **路径检查有 TOCTOU 窗口。** resolve 与后续 open 之间路径可能被替换；当前不是内核级沙箱。
-6. **trace 尚未接入 loop。** `loop.py:106-108` 把逐步记录称为 follow-up，当前测试不要求。
+6. **trace 已接入主循环。** 提供记录器和任务 ID 时，主循环记录 `loop.result` 与工具拒绝/错误事件，开启规划时记录 `run.plan`；`devsquad run` 仍未调用 `run_loop`，因此这些事件不会由 CLI 自动产生。
 7. **本地服务只有健康检查。** 没有任务/工具/模型 HTTP API，也没有 CLI 启动命令。
 8. **前端、Tauri、evals 都是占位。** 没有页面、桌面壳、基准数据集或可报告的通过率。
 9. **费用仍用 float USD。** `ModelTurn` docstring（`loop.py:33-37`）提醒二进制浮点问题，未来可改整数 micro-dollars；本 PR 明确使用 `>` 比较预算。
