@@ -1,10 +1,7 @@
 """智能体主循环。
 
-状态：只有接口。项目作者需要实现 ``run_loop``。
+状态：默认执行编码循环；开启 Planner 后先规划再编码。
 测试：``backend/tests/test_agent_loop.py``
-这样跑目前会失败的测试::
-
-    pytest -m student --runxfail tests/test_agent_loop.py
 
 测试会注入一个假的模型。这个函数不能打开套接字，也不能导入大模型 SDK。
 
@@ -22,6 +19,16 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from devsquad.sandbox.pathguard import SandboxError
+from devsquad.tools.permissions import Decision
+from devsquad.tools.sandbox import dispatch_tool
+
+if TYPE_CHECKING:
+    from devsquad.agent.planner import PlannerConfig, PlannerModel
+    from devsquad.traces import TraceRecorder
 
 
 @dataclass(frozen=True)
@@ -67,49 +74,103 @@ def run_loop(
     permissions: object,
     max_steps: int,
     max_cost_usd: float,
+    planner_enabled: bool = False,
+    repo_root: str | Path | None = None,
+    planner_model: PlannerModel | None = None,
+    planner_config: PlannerConfig | None = None,
+    trace_recorder: TraceRecorder | None = None,
+    task_id: str | None = None,
 ) -> LoopResult:
-    """一直跑到智能体结束，或某个限制被触发。
+    """运行共享编码循环，开启规划时先生成计划并注入上下文。
 
-    TODO(student): 换掉这个函数体。测试就是规格。建议按这个顺序：
-
-    1. 若 ``max_steps < 1`` 或 ``max_cost_usd < 0``，在调用模型之前抛出
-       ``ValueError``。
-    2. ``messages`` 从 ``[{"role": "user", "content": task}]`` 开始。
-    3. 每一轮按这个顺序：
-       a. 若 ``steps >= max_steps``，返回 ``status="step_limit"``。不要再调用
-          ``peek_cost`` 或 ``complete``。
-       b. ``upcoming = float(model.peek_cost(messages))``。若
-          ``spent + upcoming > max_cost_usd``，返回 ``status="cost_limit"``，
-          并且不要调用 ``model.complete``。刚好花到预算是允许的；比较用的是
-          ``>``，不是 ``>=``。
-       c. ``turn = model.complete(messages)``。把 ``turn.cost_usd`` 加进
-          ``spent``，步数加一。
-       d. 若 ``turn.tool_name`` 是 None，追加
-          ``{"role": "assistant", "content": turn.final_text}``，并带着这段
-          最终文本返回 ``status="completed"``。若 ``final_text`` 也是 None，
-          改为返回 ``status="error"``。
-       e. 否则先追加模块文档字符串里那种助手工具消息，然后
-          ``decision = permissions.check(name, args)``，其中 ``args`` 是
-          ``dict(turn.tool_args or {})``。
-          * ``Decision.DENY``：不要调用工具。返回 ``status="denied"``。
-          * ``Decision.ASK_HUMAN``：不要调用工具。返回 ``status="ask_human"``。
-          * ``Decision.ALLOW``：若 ``name`` 不在 ``tools`` 里，返回
-            ``status="error"``，什么都不要调用。否则调用
-            ``tools[name](**args)``，追加工具消息，然后继续循环。
-          * 其他任何决定：返回 ``status="error"``。
-    4. 不要接住工具抛出的异常，让它继续往外抛。
-    5. ``Decision`` 定义在 ``devsquad.tools.permissions``。
-
-    用 ``TraceRecorder`` 记下每一步是合适的后续工作。本 PR 的测试不要求这次
-    写入，也不要求发起网络请求。
-
-    抛出：
-        NotImplementedError：在这个函数体被替换之前，每次都会抛出。
-        ValueError：实现之后，步数上限不是正数，或费用上限为负时抛出。
+    开启时必须提供仓库、独立规划模型、记录器和已有任务 ID。
+    规划使用独立模型，步数和费用上限仅统计编码阶段。
+    ``run.plan`` 事件的 ``plan`` 字段与注入编码上下文的计划完全相同，
+    包含相关文件、检索编号、查询及关键词，不记录代码片段或检索异常。
     """
-    raise NotImplementedError(
-        "尚未实现 devsquad.agent.loop.run_loop"
-        "（步数上限、费用上限、工具分发）。"
-        "请看本函数文档字符串和 tests/test_agent_loop.py。"
-        "运行：pytest -m student --runxfail tests/test_agent_loop.py"
+    if max_steps < 1 or max_cost_usd < 0:
+        raise ValueError("步数上限必须为正数，费用上限不能为负")
+    messages = [{"role": "user", "content": task}]
+    if planner_enabled:
+        if (repo_root is None or planner_model is None
+                or trace_recorder is None or not task_id):
+            raise ValueError("开启 Planner 必须提供仓库、规划模型、记录器和任务 ID")
+        # 延迟导入，关闭时不加载或调用 Planner，也避免模型接口的循环导入。
+        from devsquad.agent.planner import plan
+
+        planned = plan(
+            root=repo_root, requirement=task, model=planner_model, config=planner_config
+        )
+        trace_recorder.record(task_id, "run.plan", {"plan": planned})
+        messages.append({"role": "user", "content": "实施计划（含相关文件）\n" + planned})
+    return _run_coding_loop(
+        messages=messages, model=model, tools=tools, permissions=permissions,
+        max_steps=max_steps, max_cost_usd=max_cost_usd,
+        repo_root=repo_root if repo_root is not None else Path.cwd(),
+        trace_recorder=trace_recorder, task_id=task_id,
     )
+
+
+def _run_coding_loop(
+    *, messages: list[dict], model: object, tools: dict[str, Callable],
+    permissions: object, max_steps: int, max_cost_usd: float,
+    repo_root: str | Path, trace_recorder: TraceRecorder | None, task_id: str | None,
+) -> LoopResult:
+    """编码阶段沿用原接口约定，限制步数、费用并检查工具权限。"""
+    steps = 0
+    spent = 0.0
+
+    def record(event_type: str, **payload) -> None:
+        if trace_recorder is not None and task_id:
+            trace_recorder.record(task_id, event_type, payload)
+
+    def result(status: str, final_text: str | None = None) -> LoopResult:
+        record("loop.result", status=status, steps=steps, cost_usd=spent)
+        return LoopResult(status, steps, spent, final_text, messages)
+
+    while steps < max_steps:
+        upcoming = float(model.peek_cost(messages))
+        if spent + upcoming > max_cost_usd:
+            return result("cost_limit")
+        turn = model.complete(messages)
+        spent += turn.cost_usd
+        steps += 1
+        if turn.tool_name is None:
+            if turn.final_text is None:
+                return result("error")
+            messages.append({"role": "assistant", "content": turn.final_text})
+            return result("completed", turn.final_text)
+        name = turn.tool_name
+        args = dict(turn.tool_args or {})
+        messages.append({
+            "role": "assistant", "content": "", "tool_name": name, "tool_args": args,
+        })
+        if name not in tools:
+            record("tool.rejected", tool_name=name, reason="unknown_tool")
+            return result("error")
+        try:
+            decision = permissions.check(name, args)
+        except Exception:
+            record("tool.rejected", tool_name=name, reason="permission_error")
+            return result("error")
+        if decision == Decision.DENY:
+            record("tool.rejected", tool_name=name, reason="permission_denied")
+            return result("denied")
+        if decision == Decision.ASK_HUMAN:
+            record("tool.rejected", tool_name=name, reason="ask_human")
+            return result("ask_human")
+        if decision != Decision.ALLOW:
+            record("tool.rejected", tool_name=name, reason="invalid_decision")
+            return result("error")
+        try:
+            value = dispatch_tool(name, args, tools, repo_root)
+        except SandboxError:
+            record("tool.rejected", tool_name=name, reason="sandbox_denied")
+            return result("denied")
+        except Exception:
+            # 不保存异常原文，避免路径或敏感内容进入 trace 和模型上下文。
+            record("tool.error", tool_name=name, reason="execution_failed")
+            messages.append({"role": "tool", "name": name, "content": "工具执行失败"})
+            return result("error")
+        messages.append({"role": "tool", "name": name, "content": str(value)})
+    return result("step_limit")

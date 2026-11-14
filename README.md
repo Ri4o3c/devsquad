@@ -99,7 +99,7 @@ pytest -m student --runxfail
 
 ## 第一期在 Windows 上的限制
 
-超时会结束子进程树：POSIX 用进程组信号，Windows 用 `taskkill /F /T`。路径守卫会跟着符号链接和目录联接解析，并按不区分大小写的方式判断是否还在 worktree 里。
+Windows 上请在 WSL 里运行。超时会结束子进程树：POSIX 用进程组信号，Windows 用 `taskkill /F /T`。路径守卫会跟着符号链接和目录联接解析，并按不区分大小写的方式判断是否还在 worktree 里。
 
 创建符号链接本身要系统允许（开发者模式或 `SeCreateSymbolicLinkPrivilege`）。机器拒绝创建时，相关测试会跳过；这不是把 Windows 上的检查关掉。目录联接不需要那个权限。网络默认关闭：Linux 探测非特权 user + net namespace，成功时强制隔离，失败时降级为 argv 拦截（`POLICY_ONLY`）。Windows 第一期没有非特权网络隔离，防火墙规则/AppContainer 需要管理员权限或额外工作；macOS 同样降级。argv 拦截只能防误操作。`RunResult.network` 标记实际级别；`CommandRunner(…, require_network_isolation=True)` 在无法强制隔离时拒绝执行，`allow_network=True` 显式允许网络（`ALLOWED`）。
 
