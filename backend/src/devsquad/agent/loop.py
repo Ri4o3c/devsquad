@@ -1,10 +1,7 @@
 """智能体主循环。
 
-状态：默认保留原骨架行为；开启 Planner 后执行规划和编码循环。
+状态：默认执行编码循环；开启 Planner 后先规划再编码。
 测试：``backend/tests/test_agent_loop.py``
-这样跑目前会失败的测试::
-
-    pytest -m student --runxfail tests/test_agent_loop.py
 
 测试会注入一个假的模型。这个函数不能打开套接字，也不能导入大模型 SDK。
 
@@ -84,16 +81,17 @@ def run_loop(
     trace_recorder: TraceRecorder | None = None,
     task_id: str | None = None,
 ) -> LoopResult:
-    """开启规划后运行编码循环，关闭时保留原来的未实现异常。
+    """运行共享编码循环，开启规划时先生成计划并注入上下文。
 
     开启时必须提供仓库、独立规划模型、记录器和已有任务 ID。
     规划使用独立模型，步数和费用上限仅统计编码阶段。
     ``run.plan`` 事件的 ``plan`` 字段与注入编码上下文的计划完全相同，
     包含相关文件、检索编号、查询及关键词，不记录代码片段或检索异常。
     """
+    if max_steps < 1 or max_cost_usd < 0:
+        raise ValueError("步数上限必须为正数，费用上限不能为负")
+    messages = [{"role": "user", "content": task}]
     if planner_enabled:
-        if max_steps < 1 or max_cost_usd < 0:
-            raise ValueError("步数上限必须为正数，费用上限不能为负")
         if (repo_root is None or planner_model is None
                 or trace_recorder is None or not task_id):
             raise ValueError("开启 Planner 必须提供仓库、规划模型、记录器和任务 ID")
@@ -104,34 +102,27 @@ def run_loop(
             root=repo_root, requirement=task, model=planner_model, config=planner_config
         )
         trace_recorder.record(task_id, "run.plan", {"plan": planned})
-        messages = [
-            {"role": "user", "content": task},
-            {"role": "user", "content": "实施计划（含相关文件）\n" + planned},
-        ]
-        return _run_coding_loop(
-            messages=messages, model=model, tools=tools, permissions=permissions,
-            max_steps=max_steps, max_cost_usd=max_cost_usd,
-            repo_root=repo_root, trace_recorder=trace_recorder, task_id=task_id,
-        )
-    raise NotImplementedError(
-        "尚未实现 devsquad.agent.loop.run_loop"
-        "（步数上限、费用上限、工具分发）。"
-        "请看本函数文档字符串和 tests/test_agent_loop.py。"
-        "运行：pytest -m student --runxfail tests/test_agent_loop.py"
+        messages.append({"role": "user", "content": "实施计划（含相关文件）\n" + planned})
+    return _run_coding_loop(
+        messages=messages, model=model, tools=tools, permissions=permissions,
+        max_steps=max_steps, max_cost_usd=max_cost_usd,
+        repo_root=repo_root if repo_root is not None else Path.cwd(),
+        trace_recorder=trace_recorder, task_id=task_id,
     )
 
 
 def _run_coding_loop(
     *, messages: list[dict], model: object, tools: dict[str, Callable],
     permissions: object, max_steps: int, max_cost_usd: float,
-    repo_root: str | Path, trace_recorder: TraceRecorder, task_id: str,
+    repo_root: str | Path, trace_recorder: TraceRecorder | None, task_id: str | None,
 ) -> LoopResult:
     """编码阶段沿用原接口约定，限制步数、费用并检查工具权限。"""
     steps = 0
     spent = 0.0
 
     def record(event_type: str, **payload) -> None:
-        trace_recorder.record(task_id, event_type, payload)
+        if trace_recorder is not None and task_id:
+            trace_recorder.record(task_id, event_type, payload)
 
     def result(status: str, final_text: str | None = None) -> LoopResult:
         record("loop.result", status=status, steps=steps, cost_usd=spent)

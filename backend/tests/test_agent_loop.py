@@ -1,25 +1,16 @@
 """``devsquad.agent.loop.run_loop`` 的规格。
 
-在作者实现主循环之前，这些测试会失败。它们标了 ``student`` 和
-``xfail(strict=False)``，所以默认的 pytest 仍然是绿的。
-
-    pytest -m student --runxfail tests/test_agent_loop.py
+默认关闭规划时也应满足步数、费用和权限约束。
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import pytest
 
 from devsquad.agent.loop import ModelTurn, run_loop
 from devsquad.tools.permissions import Decision
-
-pytestmark = [
-    pytest.mark.student,
-    pytest.mark.xfail(
-        reason="student TODO: implement devsquad.agent.loop.run_loop",
-        strict=False,
-    ),
-]
 
 
 class ScriptedModel:
@@ -98,7 +89,10 @@ def test_step_limit_stops_before_another_model_call() -> None:
     assert result.steps == 2
     assert model.calls == 2
     assert model.peeked == 2
-    assert calls == [{"path": "a.py"}, {"path": "b.py"}]
+    assert calls == [
+        {"path": str(Path.cwd() / "a.py")},
+        {"path": str(Path.cwd() / "b.py")},
+    ]
 
 
 def test_cost_limit_does_not_run_the_call_that_would_exceed_the_budget() -> None:
@@ -166,7 +160,7 @@ def test_first_call_over_budget_does_not_call_the_model() -> None:
 
 def test_allow_dispatches_tool_and_feeds_the_result_back() -> None:
     def read_file(path: str) -> str:
-        assert path == "a.py"
+        assert path == str(Path.cwd() / "a.py")
         return "file-body"
 
     model = ScriptedModel(
