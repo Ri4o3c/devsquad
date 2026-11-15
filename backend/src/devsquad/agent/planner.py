@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -53,6 +54,7 @@ def extract_keywords(requirement: str, limit: int = 16) -> list[str]:
 def plan(
     *, root: str | Path, requirement: str, model: PlannerModel,
     config: PlannerConfig | None = None,
+    report_retrieval: Callable[[int, bool], None] | None = None,
 ) -> str:
     """检索失败继续规划；返回值附实际来源，不依赖模型遵循输出格式。"""
     config = config or PlannerConfig()
@@ -64,6 +66,7 @@ def plan(
     provenance = f"检索 #1：查询={query!r}；关键词={keywords!r}"
     related = ["相关文件", provenance]
     snippets = []
+    retrieval_failed = False
     try:
         # Python 后端在读取文件前过滤路径，避免 rg 预先读取受保护文件。
         hits = search_code(
@@ -77,6 +80,9 @@ def plan(
         # 异常可能含敏感信息，不向模型或计划传递异常原文。
         related = ["相关文件", provenance]
         snippets = []
+        retrieval_failed = True
+    if report_retrieval is not None:
+        report_retrieval(len(snippets), retrieval_failed)
     if len(related) == 2:
         related.append("未检索到相关代码")
     references = "\n".join(related)

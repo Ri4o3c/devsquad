@@ -1,6 +1,6 @@
 """验证规划进入编码上下文和 trace，以及关闭时的兼容性。"""
 
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 import pytest
 
@@ -20,10 +20,14 @@ def test_loop_receives_plan_and_records_trace(tmp_path):
         assert "先修改检索" in planned
         assert "相关文件" in planned and "search.py:1-2" in planned
         assert "来自检索 #1" in planned and "关键词=" in planned
-        recorder.record.assert_called_once()
-        assert recorder.record.call_args.args == (
-            "task-1", "run.plan", {"plan": planned.split("\n", 1)[1]}
-        )
+        events = [entry.args for entry in recorder.record.call_args_list]
+        assert [event for _, event, _ in events] == [
+            "run.started", "run.retrieval", "run.plan", "model.started",
+        ]
+        assert events[1][2] == {"hit_count": 1, "retrieval_failed": False}
+        assert set(events[2][2]) == {"duration_ms"}
+        assert "先修改检索" not in str(events)
+        assert "search.py" not in str(events)
         return ModelTurn(0, final_text="编码完成")
 
     coder.complete.side_effect = complete
@@ -55,7 +59,10 @@ def test_disabled_runs_without_planning(options):
     ]
     planner_model.assert_not_called()
     planner_model.complete.assert_not_called()
-    recorder.record.assert_called_once_with(
+    assert [entry.args[1] for entry in recorder.record.call_args_list] == [
+        "run.started", "model.started", "model.completed", "loop.result",
+    ]
+    assert recorder.record.call_args == call(
         "task-1", "loop.result", {"status": "completed", "steps": 1, "cost_usd": 0.25},
     )
 

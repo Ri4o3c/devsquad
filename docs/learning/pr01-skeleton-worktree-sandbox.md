@@ -49,7 +49,7 @@
 | 命令运行器 | 已完成基线。只收 argv，固定 `shell=False`，限制 cwd、环境变量、超时和输出大小，超时杀进程组。 |
 | 本地 HTTP 接口 | 已完成且只有 `GET /health`；校验 token、Host、Origin，固定绑定 `127.0.0.1`。 |
 | 执行记录 | 已完成存储 API `TraceRecorder`；主循环在提供记录器和任务 ID 时记录 `loop.result` 与工具事件，开启规划时另记 `run.plan`。 |
-| 三份学生作业 | BM25 已由 PR #4 实现；`run_loop` 已实现默认编码循环；仅 `PermissionPolicy.check` 的核心函数仍抛 `NotImplementedError`。 |
+| 三份练习 | BM25、默认编码循环和 `PermissionPolicy.check` 均已有实现。通用 CLI 仍需接入执行和批准流程。 |
 | CI | 已完成。Python 3.11 上安装、Ruff、默认 pytest。学生测试用非严格 `xfail` 暂时保持默认套件绿色。 |
 | 前端、桌面壳、评测 | 只有目录说明，没有实现。 |
 
@@ -268,7 +268,7 @@ traces 是未来 Agent 的追加式审计记录：模型轮次、工具调用、
 - `backend/pyproject.toml:37-43`：pytest 只找 `tests`，把项目根和 `src` 加入 `pythonpath`，默认参数 `-ra`，注册 `student` marker。
 - `.github/workflows/ci.yml` 在 main push 和所有 PR 上运行：Ubuntu、Python 3.11、`pip install -e ".[dev]"`、`ruff check .`、`pytest`。
 - `backend/tests/test_no_llm.py:17` 的 `test_package_source_has_no_shell_true_or_model_sdk` 扫描包源码，禁止 `shell=True`、常见模型 SDK import 和模型 API 域名。
-- 未实现的学生测试同时带 `student` 和 `xfail(strict=False)`（当前只剩 BM25 与权限两份）。默认 `pytest` 中，未实现导致失败属于预期；`--runxfail` 才把它们当普通测试执行。
+- 历史练习可同时带 `student` 和 `xfail(strict=False)`。权限策略用例现按普通测试执行。`--runxfail` 可让仍带标记的用例按普通测试执行。
 
 **为什么这样设计**
 
@@ -367,10 +367,10 @@ pytest -m student --runxfail         # 未实现作业按真实通过/失败执�
 ruff check .                        # 静态检查
 ```
 
-BM25 已由 PR #4 实现，`run_loop` 也已实现，当前只剩 `PermissionPolicy.check()` 一份作业。阅读顺序仍建议 **`bm25.py` → `permissions.py` → `agent/loop.py`**：
+BM25、`run_loop` 和 `PermissionPolicy.check()` 均已有实现。阅读顺序仍建议 **`bm25.py` → `permissions.py` → `agent/loop.py`**。
 
 1. BM25 是纯内存算法，先熟悉“docstring + 数值测试就是合同”。
-2. 权限策略复用已经完成的 `PathGuard`，建立 `Decision` 的语义，这是当前唯一待实现的作业。
+2. 权限策略复用 `PathGuard`。读取可直接允许，合法写入和命令返回 `ASK_HUMAN`。
 3. 主循环已把步数、费用、消息 transcript、权限和工具分发组合起来；它的测试使用 fake model 和 fake permissions，不依赖真实模型，也不要求 BM25。
 
 完成权限作业后先跑对应文件命令；最后跑完整的 `pytest -m student --runxfail`、普通 `pytest` 和 `ruff check .`。
@@ -538,8 +538,8 @@ pytest tests/test_agent_loop.py
 以下不是“笔记漏看”，而是源码、README 或模块 TODO 明确留下的边界：
 
 1. **Agent 主循环已实现，但尚未接入 `devsquad run`。** `run` 只创建工作区；`run_loop` 已含默认编码循环和可选 Planner，但完整角色编排、LangGraph 和真实模型调用仍是后续工作。
-2. **权限作业仍是 `NotImplementedError`。** BM25 已由 PR #4 实现，`run_loop` 也已实现；默认 pytest 的绿色包含非严格 xfail，不代表 `PermissionPolicy.check` 已经可用。
-3. **没有网络隔离。** `runner.py:15-19` 是明确 TODO；代理环境变量不算隔离。未来需要用 OS 能力，并验证真实 `connect()` 失败。
+2. **权限决策已实现。** `PermissionPolicy.check` 使用 `PathGuard` 判断读写边界。`ASK_HUMAN` 由调用方处理。
+3. **Agent 命令要求文件系统和 OS 网络隔离。** Bubblewrap 使用只读源文件快照、私有临时目录和独立网络命名空间，隔离条件不满足时拒绝启动工具进程。
 4. **没有完整的子进程文件系统隔离。** `PathGuard` 管应用检查过的路径与 cwd，管不住子进程自己打开绝对路径；`shell=False` 也不改变这一点。
 5. **路径检查有 TOCTOU 窗口。** resolve 与后续 open 之间路径可能被替换；当前不是内核级沙箱。
 6. **trace 已接入主循环。** 提供记录器和任务 ID 时，主循环记录 `loop.result` 与工具拒绝/错误事件，开启规划时记录 `run.plan`；`devsquad run` 仍未调用 `run_loop`，因此这些事件不会由 CLI 自动产生。
@@ -547,7 +547,7 @@ pytest tests/test_agent_loop.py
 8. **前端、Tauri、evals 都是占位。** 没有页面、桌面壳、基准数据集或可报告的通过率。
 9. **费用仍用 float USD。** `ModelTurn` docstring（`loop.py:33-37`）提醒二进制浮点问题，未来可改整数 micro-dollars；本 PR 明确使用 `>` 比较预算。
 10. **`.env` 不自动加载。** 这是当前明确设计，不要运行后把“token 为空导致 401”误判成鉴权代码失效。
-11. **学生模块尚未组成完整产品链路。** BM25 没被 Agent 调用，权限策略和主循环也未接入 `devsquad run`；即使三份作业完成，也还要后续集成工作。
+11. **`devsquad run` 仍负责创建任务和 worktree。** Planner 启用时会调用 BM25 检索。通用 CLI 还需接入模型、编码循环和人工确认。
 
 老板合并前的合理检查顺序是：先看 diff，再跑普通 `pytest` 和 `ruff check .` 验证骨架，再确认自己理解学生测试为何暂时 xfail。合并后按第 4 节顺序亲手实现，不要只追求默认 CI 绿色。
 

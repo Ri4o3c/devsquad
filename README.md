@@ -20,8 +20,8 @@ DevSquad 是一个桌面端多智能体编程工作台。计划中的最终形�
 | `devsquad run` 在目标仓库外面建 git worktree | 本 PR |
 | 路径守卫和命令运行器（参数列表、超时、最小环境变量） | 本 PR |
 | FastAPI 只提供本机 `/health` | 本 PR |
-| Agent 主循环、工具权限、BM25 检索 | 只留接口和测试，由作者实现 |
-| 默认禁网（Linux namespace；不可用时降级为 argv 拦截） | 已实现，结果标记隔离级别 |
+| Agent 主循环、工具权限、BM25 检索 | 编码循环、BM25 检索和默认权限决策已实现 |
+| 命令隔离 | Agent 命令使用 Bubblewrap 隔离文件系统、进程和网络 |
 | Vue 页面、Tauri 壳、真正的模型调用 | 后续 PR |
 
 这里不写通过率、耗时或其他还没测过的数字。
@@ -83,7 +83,7 @@ ruff check .
 pytest
 ```
 
-三份学生作业的测试现在会失败，但标了 `xfail`，所以默认的 `pytest` 仍然是绿的。想看真正的失败（实现做对之后应该通过）：
+权限决策测试按普通用例执行。以下命令也可让曾标记 `xfail` 的学生用例按普通测试执行。
 
 ```bash
 pytest -m student --runxfail
@@ -101,7 +101,13 @@ pytest -m student --runxfail
 
 Windows 上请在 WSL 里运行。超时会结束子进程树：POSIX 用进程组信号，Windows 用 `taskkill /F /T`。路径守卫会跟着符号链接和目录联接解析，并按不区分大小写的方式判断是否还在 worktree 里。
 
-创建符号链接本身要系统允许（开发者模式或 `SeCreateSymbolicLinkPrivilege`）。机器拒绝创建时，相关测试会跳过；这不是把 Windows 上的检查关掉。目录联接不需要那个权限。网络默认关闭：Linux 探测非特权 user + net namespace，成功时强制隔离，失败时降级为 argv 拦截（`POLICY_ONLY`）。Windows 第一期没有非特权网络隔离，防火墙规则/AppContainer 需要管理员权限或额外工作；macOS 同样降级。argv 拦截只能防误操作。`RunResult.network` 标记实际级别；`CommandRunner(…, require_network_isolation=True)` 在无法强制隔离时拒绝执行，`allow_network=True` 显式允许网络（`ALLOWED`）。
+创建符号链接需要系统权限。Windows 上权限不足时可跳过相关测试，目录联接测试有独立覆盖。
+
+Agent 的 `run_command` 要求支持用户命名空间的 Linux 和新版 Bubblewrap。默认使用 `/usr/bin/bwrap`。部署方可通过 `DEVSQUAD_BWRAP` 指定可信安装的绝对路径。缺少隔离能力时命令无法启动。
+
+进程在 `/workspace` 读取只读快照，可写入私有 `/tmp`。快照按文件名排除常见凭据、Git 元数据和本地依赖缓存，并略过链接与特殊文件。快照最多 64 MiB 和 10,000 个目录项。命令使用 Linux 系统工具和运行库，支持以相对路径访问源文件。
+
+默认权限策略允许安全路径的读取，对写操作和命令返回 `ASK_HUMAN`。通用 CLI 仍需接入确认与继续执行。单独使用 `CommandRunner` 的旧接口可选仅做 argv 和网络策略检查，隔离后的 Agent 工具入口固定走文件系统与网络隔离。
 
 ## 再往下读
 

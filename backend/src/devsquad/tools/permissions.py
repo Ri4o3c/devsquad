@@ -1,11 +1,5 @@
 """工具权限检查。
 
-状态：只有接口。项目作者需要实现 ``PermissionPolicy.check``。
-测试：``backend/tests/test_permissions.py``
-这样跑目前会失败的测试::
-
-    pytest -m student --runxfail tests/test_permissions.py
-
 请使用 :class:`devsquad.sandbox.pathguard.PathGuard` 和
 :func:`devsquad.sandbox.pathguard.is_secret_filename`，不要自己再写一套符号链接逻辑。
 用字符串 ``startswith`` 判断路径，过不了符号链接和前缀测试。
@@ -17,6 +11,8 @@ from __future__ import annotations
 
 from enum import StrEnum
 from pathlib import Path
+
+from devsquad.sandbox.pathguard import PathGuard, SandboxError
 
 READ_TOOLS = frozenset({"read_file", "list_dir", "grep"})
 WRITE_TOOLS = frozenset({"write_file", "edit_file"})
@@ -46,7 +42,7 @@ class PermissionPolicy:
     def check(self, tool_name: str, arguments: dict) -> Decision:
         """返回 ``tool_name`` 带着 ``arguments`` 调用时的决定。
 
-        TODO(student): 实现下面这张表。未知情况一律拒绝。
+        未知情况一律拒绝。
 
         * 工具名在 ``deny_tools`` 里 → ``DENY``，哪怕别的规则会允许。
         * ``http_get`` 或 ``http_post`` → ``DENY``。
@@ -76,12 +72,27 @@ class PermissionPolicy:
         测试会创建真实的符号链接。用前缀判断会把 ``/tmp/wt-evil`` 当成
         ``/tmp/wt`` 里面，从而失败。
 
-        抛出：
-            NotImplementedError：在这个函数体被替换之前，每次都会抛出。
         """
-        raise NotImplementedError(
-            "尚未实现 PermissionPolicy.check"
-            "（allow / ask_human / deny）。"
-            "请看本函数文档字符串和 tests/test_permissions.py。"
-            "运行：pytest -m student --runxfail tests/test_permissions.py"
-        )
+        if not isinstance(tool_name, str) or not isinstance(arguments, dict):
+            return Decision.DENY
+        known = READ_TOOLS | WRITE_TOOLS | COMMAND_TOOLS
+        if tool_name in self.deny_tools or tool_name not in known:
+            return Decision.DENY
+        try:
+            guard = PathGuard(self.worktree)
+            if tool_name in COMMAND_TOOLS:
+                cwd = arguments.get("cwd")
+                if cwd is None or guard.check_read(cwd).is_dir():
+                    return Decision.ASK_HUMAN
+                return Decision.DENY
+
+            path = arguments.get("path", "." if tool_name == "list_dir" else None)
+            if not isinstance(path, (str, Path)) or not path:
+                return Decision.DENY
+            if tool_name in WRITE_TOOLS:
+                guard.check_tool_write(path)
+                return Decision.ASK_HUMAN
+            guard.check_read(path)
+            return Decision.ALLOW
+        except (OSError, RuntimeError, SandboxError, TypeError, ValueError):
+            return Decision.DENY

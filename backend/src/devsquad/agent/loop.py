@@ -19,10 +19,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from math import isfinite
 from pathlib import Path
+from time import monotonic
 from typing import TYPE_CHECKING
 
 from devsquad.sandbox.pathguard import SandboxError
+from devsquad.sandbox.runner import RunResult
 from devsquad.tools.permissions import Decision
 from devsquad.tools.sandbox import dispatch_tool
 
@@ -46,6 +49,8 @@ class ModelTurn:
     final_text: str | None = None
     tool_name: str | None = None
     tool_args: dict | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -85,23 +90,35 @@ def run_loop(
 
     开启时必须提供仓库、独立规划模型、记录器和已有任务 ID。
     规划使用独立模型，步数和费用上限仅统计编码阶段。
-    ``run.plan`` 事件的 ``plan`` 字段与注入编码上下文的计划完全相同，
-    包含相关文件、检索编号、查询及关键词，不记录代码片段或检索异常。
+    轨迹仅记录运行元数据。规划输出、检索词与代码片段仅传入模型上下文。
     """
-    if max_steps < 1 or max_cost_usd < 0:
+    if not (max_steps >= 1 and max_cost_usd >= 0):
         raise ValueError("步数上限必须为正数，费用上限不能为负")
     messages = [{"role": "user", "content": task}]
+    if planner_enabled and (repo_root is None or planner_model is None
+                            or trace_recorder is None or not task_id):
+        raise ValueError("开启 Planner 必须提供仓库、规划模型、记录器和任务 ID")
+    if trace_recorder is not None and task_id:
+        trace_recorder.record(task_id, "run.started", {"planner_enabled": planner_enabled})
     if planner_enabled:
-        if (repo_root is None or planner_model is None
-                or trace_recorder is None or not task_id):
-            raise ValueError("开启 Planner 必须提供仓库、规划模型、记录器和任务 ID")
         # 延迟导入，关闭时不加载或调用 Planner，也避免模型接口的循环导入。
         from devsquad.agent.planner import plan
 
-        planned = plan(
-            root=repo_root, requirement=task, model=planner_model, config=planner_config
-        )
-        trace_recorder.record(task_id, "run.plan", {"plan": planned})
+        def report_retrieval(hits: int, failed: bool) -> None:
+            trace_recorder.record(task_id, "run.retrieval", {
+                "hit_count": hits, "retrieval_failed": failed,
+            })
+
+        started = monotonic()
+        try:
+            planned = plan(
+                root=repo_root, requirement=task, model=planner_model,
+                config=planner_config, report_retrieval=report_retrieval,
+            )
+        except Exception:
+            trace_recorder.record(task_id, "run.plan.error", _elapsed(started))
+            raise
+        trace_recorder.record(task_id, "run.plan", _elapsed(started))
         messages.append({"role": "user", "content": "实施计划（含相关文件）\n" + planned})
     return _run_coding_loop(
         messages=messages, model=model, tools=tools, permissions=permissions,
@@ -109,6 +126,10 @@ def run_loop(
         repo_root=repo_root if repo_root is not None else Path.cwd(),
         trace_recorder=trace_recorder, task_id=task_id,
     )
+
+
+def _elapsed(started: float) -> dict[str, int]:
+    return {"duration_ms": round((monotonic() - started) * 1000)}
 
 
 def _run_coding_loop(
@@ -130,11 +151,28 @@ def _run_coding_loop(
 
     while steps < max_steps:
         upcoming = float(model.peek_cost(messages))
+        if not isfinite(upcoming) or upcoming < 0:
+            return result("error")
         if spent + upcoming > max_cost_usd:
             return result("cost_limit")
-        turn = model.complete(messages)
-        spent += turn.cost_usd
+        record("model.started", step=steps + 1)
+        started = monotonic()
+        try:
+            turn = model.complete(messages)
+        except Exception:
+            record("model.error", step=steps + 1, **_elapsed(started))
+            raise
         steps += 1
+        if not isfinite(turn.cost_usd) or turn.cost_usd < 0:
+            record("model.error", step=steps, **_elapsed(started))
+            return result("error")
+        spent += turn.cost_usd
+        record("model.completed", step=steps, cost_usd=turn.cost_usd,
+               input_tokens=getattr(turn, "input_tokens", None),
+               output_tokens=getattr(turn, "output_tokens", None),
+               **_elapsed(started))
+        if spent > max_cost_usd:
+            return result("cost_limit")
         if turn.tool_name is None:
             if turn.final_text is None:
                 return result("error")
@@ -146,7 +184,7 @@ def _run_coding_loop(
             "role": "assistant", "content": "", "tool_name": name, "tool_args": args,
         })
         if name not in tools:
-            record("tool.rejected", tool_name=name, reason="unknown_tool")
+            record("tool.rejected", reason="unknown_tool", step=steps)
             return result("error")
         try:
             decision = permissions.check(name, args)
@@ -162,15 +200,21 @@ def _run_coding_loop(
         if decision != Decision.ALLOW:
             record("tool.rejected", tool_name=name, reason="invalid_decision")
             return result("error")
+        record("tool.started", step=steps, tool_name=name)
+        started = monotonic()
         try:
             value = dispatch_tool(name, args, tools, repo_root)
         except SandboxError:
-            record("tool.rejected", tool_name=name, reason="sandbox_denied")
+            record("tool.rejected", tool_name=name, reason="sandbox_denied", **_elapsed(started))
             return result("denied")
         except Exception:
             # 不保存异常原文，避免路径或敏感内容进入 trace 和模型上下文。
-            record("tool.error", tool_name=name, reason="execution_failed")
+            record("tool.error", tool_name=name, reason="execution_failed", **_elapsed(started))
             messages.append({"role": "tool", "name": name, "content": "工具执行失败"})
             return result("error")
+        details = _elapsed(started)
+        if isinstance(value, RunResult):
+            details.update(returncode=value.returncode, timed_out=value.timed_out)
+        record("tool.completed", step=steps, tool_name=name, **details)
         messages.append({"role": "tool", "name": name, "content": str(value)})
     return result("step_limit")

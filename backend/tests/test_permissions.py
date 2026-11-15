@@ -1,9 +1,4 @@
-"""``PermissionPolicy.check`` 的规格。
-
-在作者实现决策表之前，这些测试会失败。``xfail(strict=False)`` 让 CI 保持绿色。
-
-    pytest -m student --runxfail tests/test_permissions.py
-"""
+"""``PermissionPolicy.check`` 的可执行规格。"""
 
 from __future__ import annotations
 
@@ -13,13 +8,7 @@ import pytest
 
 from devsquad.tools.permissions import Decision, PermissionPolicy
 
-pytestmark = [
-    pytest.mark.student,
-    pytest.mark.xfail(
-        reason="student TODO: implement PermissionPolicy.check",
-        strict=False,
-    ),
-]
+pytestmark = pytest.mark.student
 
 
 def _policy(root: Path, deny_tools: set[str] | None = None) -> PermissionPolicy:
@@ -122,3 +111,10 @@ def test_deny_list_overrides_an_otherwise_safe_read(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text("x\n", encoding="utf-8")
     policy = _policy(tmp_path, deny_tools={"read_file"})
     assert policy.check("read_file", {"path": "a.py"}) == Decision.DENY
+
+
+def test_credentials_in_hidden_directories_are_denied(tmp_path: Path) -> None:
+    policy = _policy(tmp_path)
+    assert policy.check("read_file", {"path": ".ssh/config"}) == Decision.DENY
+    assert policy.check("edit_file", {"path": "nested/.aws/credentials"}) == Decision.DENY
+    assert policy.check("run_command", {"cwd": ".kube"}) == Decision.DENY

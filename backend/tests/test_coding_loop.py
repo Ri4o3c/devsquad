@@ -33,7 +33,11 @@ class CodingLoopTests(TestCase):
         )
 
     def assert_event(self, event_type, **payload):
-        self.assertIn((("task-1", event_type, payload), {}), self.recorder.record.call_args_list)
+        for entry in self.recorder.record.call_args_list:
+            task, event, stored = entry.args
+            if task == "task-1" and event == event_type and payload.items() <= stored.items():
+                return
+        self.fail(f"Expected {event_type} with {payload}")
 
     def test_step_limit_stops_before_next_model_call(self):
         result = self.run_turns([ModelTurn(0.25, tool_name="test_tool")], max_steps=1)
@@ -53,6 +57,12 @@ class CodingLoopTests(TestCase):
         result = self.run_turns([ModelTurn(0.25, final_text="done")], max_cost=0.25)
         self.assertEqual(result.status, "completed")
 
+    def test_actual_cost_over_budget_prevents_tool_execution(self):
+        result = self.run_turns([ModelTurn(0.5, tool_name="test_tool")], max_cost=0.25)
+        self.assertEqual(result.status, "cost_limit")
+        self.assertEqual(result.cost_usd, 0.5)
+        self.tool.assert_not_called()
+
     def test_permission_denied_is_traced_without_execution(self):
         self.permissions.check.return_value = Decision.DENY
         result = self.run_turns([ModelTurn(0.25, tool_name="test_tool")])
@@ -71,7 +81,8 @@ class CodingLoopTests(TestCase):
         result = self.run_turns([ModelTurn(0.25, tool_name="unknown")])
         self.assertEqual(result.status, "error")
         self.permissions.check.assert_not_called()
-        self.assert_event("tool.rejected", tool_name="unknown", reason="unknown_tool")
+        self.assert_event("tool.rejected", reason="unknown_tool", step=1)
+        self.assertNotIn("'tool_name': 'unknown'", str(self.recorder.record.call_args_list))
 
     def test_path_escape_is_blocked_even_if_policy_allows(self):
         result = self.run_turns(
@@ -109,12 +120,14 @@ class CodingLoopTests(TestCase):
                  ModelTurn(0.25, final_text="done")], tools={"run_command": self.tool},
             )
         self.assertEqual(result.status, "completed")
-        runner.assert_called_once_with(self.root, require_network_isolation=True)
+        runner.assert_called_once_with(
+            self.root, require_network_isolation=True, require_filesystem_isolation=True,
+        )
         runner.return_value.run.assert_called_once_with(args=["echo", "ok"])
         self.tool.assert_not_called()
 
-    def test_missing_network_namespace_rejects_without_process(self):
-        with patch("devsquad.sandbox.runner.network_namespace_command", return_value=None), \
+    def test_missing_filesystem_sandbox_rejects_without_process(self):
+        with patch.dict("os.environ", {"DEVSQUAD_BWRAP": str(self.root / "missing-bwrap")}), \
                 patch("devsquad.sandbox.runner.subprocess.Popen") as popen:
             result = self.run_turns(
                 [ModelTurn(0.25, tool_name="run_command", tool_args={"args": ["echo", "ok"]})],

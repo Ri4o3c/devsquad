@@ -16,8 +16,10 @@ import threading
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from math import isfinite
 from pathlib import Path
 
+from devsquad.sandbox.filesystem import isolated_command
 from devsquad.sandbox.network import (
     NetworkIsolation,
     network_command_reason,
@@ -114,6 +116,7 @@ class CommandRunner:
 
     allow_network 显式允许网络；否则 require_network_isolation 要求 OS 隔离，
     不支持时拒绝启动。两者同时启用时，以显式允许网络为准。
+    require_filesystem_isolation 使用只读源文件快照和私有网络，缺少 Bubblewrap 时拒绝。
     """
 
     def __init__(
@@ -124,13 +127,17 @@ class CommandRunner:
         max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
         allow_network: bool = False,
         require_network_isolation: bool = False,
+        require_filesystem_isolation: bool = False,
     ) -> None:
-        if timeout_s <= 0:
+        if not isfinite(timeout_s) or timeout_s <= 0:
             raise ValueError("timeout_s must be positive")
         if max_output_bytes < 1:
             raise ValueError("max_output_bytes must be positive")
+        if require_filesystem_isolation and allow_network:
+            raise ValueError("filesystem-isolated commands require an isolated network")
         self.allow_network = allow_network
         self.require_network_isolation = require_network_isolation
+        self.require_filesystem_isolation = require_filesystem_isolation
         self.guard = PathGuard(worktree)
         self.timeout_s = float(timeout_s)
         self.max_output_bytes = int(max_output_bytes)
@@ -149,12 +156,27 @@ class CommandRunner:
         shell commands usually sneak in.
         """
         argv = _validate_args(args)
+        timeout = self.timeout_s if timeout_s is None else timeout_s
+        if not isfinite(timeout) or timeout <= 0:
+            raise ValueError("timeout_s must be positive")
+        cwd_path = self._cwd(cwd)
         network = NetworkIsolation.ALLOWED
         command = argv
         if not self.allow_network:
             reason = network_command_reason(argv)
             if reason:
                 raise CommandRejected(reason)
+            if self.require_filesystem_isolation:
+                if timeout > self.timeout_s:
+                    raise CommandRejected("命令超时值超过隔离运行上限")
+                try:
+                    with isolated_command(self.guard.root, cwd_path, argv) as sandboxed:
+                        return self._execute(
+                            argv, sandboxed, self.guard.root, {}, timeout,
+                            NetworkIsolation.NAMESPACE,
+                        )
+                except OSError as exc:
+                    raise CommandRejected("无法启动隔离命令") from exc
             prefix = network_namespace_command()
             network = NetworkIsolation.NAMESPACE if prefix else NetworkIsolation.POLICY_ONLY
             if prefix:
@@ -162,12 +184,17 @@ class CommandRunner:
                 command = [*prefix, *argv]
             elif self.require_network_isolation:
                 raise CommandRejected("当前环境不支持非特权网络隔离，已拒绝启动子进程")
-        timeout = self.timeout_s if timeout_s is None else timeout_s
-        if timeout <= 0:
-            raise ValueError("timeout_s must be positive")
-        cwd_path = self._cwd(cwd)
-        env = minimal_env()
+        return self._execute(argv, command, cwd_path, minimal_env(), timeout, network)
 
+    def _execute(
+        self,
+        argv: list[str],
+        command: list[str],
+        cwd_path: Path,
+        env: dict[str, str],
+        timeout: float,
+        network: NetworkIsolation,
+    ) -> RunResult:
         started = time.monotonic()
         # shell is a literal False. It is not a parameter.
         # On Windows start_new_session is ignored, so the process group has

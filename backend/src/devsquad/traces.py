@@ -1,6 +1,6 @@
 """Append-only trace recorder.
 
-The agent loop does not exist yet. This API is the storage it will call.
+Agent and tool events use this storage without changing the database schema.
 ``record`` writes one JSON object and assigns a per-task sequence number
 starting at 1. It does not call a model.
 """
@@ -11,6 +11,7 @@ import json
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from math import isfinite
 from pathlib import Path
 
 from devsquad.db import connect
@@ -26,6 +27,40 @@ class TraceEvent:
     event_type: str
     payload: dict
     created_at: str
+
+
+_DISPLAY_EVENTS = frozenset({
+    "run.started", "run.retrieval", "run.plan", "run.plan.error",
+    "model.started", "model.completed", "model.error",
+    "tool.started", "tool.completed", "tool.rejected", "tool.error", "loop.result",
+})
+_DISPLAY_NUMBERS = frozenset({
+    "step", "steps", "cost_usd", "duration_ms", "hit_count", "returncode",
+    "input_tokens", "output_tokens", "retrieval_failed", "planner_enabled", "timed_out",
+})
+_DISPLAY_STATUS = frozenset({
+    "completed", "step_limit", "cost_limit", "denied", "ask_human", "error",
+})
+_DISPLAY_REASON = frozenset({
+    "unknown_tool", "permission_error", "permission_denied", "ask_human",
+    "invalid_decision", "sandbox_denied", "execution_failed",
+})
+
+
+def trace_summary(event: TraceEvent) -> str:
+    """Format operational metadata without displaying legacy prompt or plan text."""
+    if event.event_type not in _DISPLAY_EVENTS:
+        return f"{event.seq}\tlegacy_event"
+    details = {}
+    for key in _DISPLAY_NUMBERS:
+        value = event.payload.get(key)
+        if type(value) in (bool, int) or (type(value) is float and isfinite(value)):
+            details[key] = value
+    for key, choices in (("status", _DISPLAY_STATUS), ("reason", _DISPLAY_REASON)):
+        value = event.payload.get(key)
+        if isinstance(value, str) and value in choices:
+            details[key] = value
+    return f"{event.seq}\t{event.event_type}\t{json.dumps(details, sort_keys=True)}"
 
 
 class TraceRecorder:
@@ -81,7 +116,8 @@ class TraceRecorder:
             )
             conn.execute("COMMIT")
         except Exception:
-            conn.execute("ROLLBACK")
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
             raise
         finally:
             conn.close()
