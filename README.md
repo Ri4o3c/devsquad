@@ -6,7 +6,7 @@ DevSquad 是一个桌面端多智能体编程工作台。计划中的最终形�
 - 本机 sidecar：Python FastAPI
 - 智能体：LangGraph 上的 Planner、Coder、Tester、Reviewer
 
-当前仓库是阶段 1 的骨架。它不会调用模型，也不会改你仓库里的文件。`devsquad run` 只创建隔离工作区。
+当前处于阶段 1。`devsquad run` 创建隔离工作区，并可在 Linux 或 WSL 显式启动模型编码循环。
 
 ## 阶段计划
 
@@ -22,7 +22,8 @@ DevSquad 是一个桌面端多智能体编程工作台。计划中的最终形�
 | FastAPI 只提供本机 `/health` | 本 PR |
 | Agent 主循环、工具权限、BM25 检索 | 编码循环、BM25 检索和默认权限决策已实现 |
 | 命令隔离 | Agent 命令使用 Bubblewrap 隔离文件系统、进程和网络 |
-| Vue 页面、Tauri 壳、真正的模型调用 | 后续 PR |
+| DeepSeek CLI | 可选模型执行和逐次人工确认 |
+| Vue 页面、Tauri 壳 | 后续 PR |
 
 这里不写通过率、耗时或其他还没测过的数字。
 
@@ -47,7 +48,18 @@ devsquad run --repo /path/to/repo --task "给 parser 补上空输入测试"
 1. 在目标仓库外面新建分支 `devsquad/<task-id>` 和对应的 git worktree
 2. 把任务记进 SQLite
 3. 打印 `task_id` 和 `worktree`
-4. 说明智能体执行要到后面的 PR 才有（这次不会跑 agent）
+
+在 Linux 或 WSL 使用 `--model deepseek-flash` 启动编码循环。需要在本机进程环境配置 `DEEPSEEK_API_KEY`。开启后，任务文字和经过大小限制与常见凭据格式过滤的工具结果会发往 DeepSeek。仅对允许外发相关代码片段的仓库开启模型执行。
+
+```bash
+devsquad run --repo /path/to/repo --task "给 parser 补上空输入测试" \
+  --model deepseek-flash --max-steps 8 --max-cost-usd 0.05
+devsquad trace <task-id>
+git -C /path/to/task-worktree diff
+git -C /path/to/task-worktree status --short
+```
+
+模型可列目录、读取文本、创建文件、修改一个唯一匹配的文本片段或请求运行隔离命令。创建或修改文件以及运行命令时，终端会显示本次申请的参数，默认拒绝。拒绝后模型可继续。没有交互终端时，运行停在 `ask_human`。预算以表列高峰单价估算，模型调用超出估算预算时停止分发工具。
 
 辅助命令：
 
@@ -107,7 +119,7 @@ Agent 的 `run_command` 要求支持用户命名空间的 Linux 和新版 Bubble
 
 进程在 `/workspace` 读取只读快照，可写入私有 `/tmp`。快照按文件名排除常见凭据、Git 元数据和本地依赖缓存，并略过链接与特殊文件。快照最多 64 MiB 和 10,000 个目录项。命令使用 Linux 系统工具和运行库，支持以相对路径访问源文件。
 
-默认权限策略允许安全路径的读取，对写操作和命令返回 `ASK_HUMAN`。通用 CLI 仍需接入确认与继续执行。单独使用 `CommandRunner` 的旧接口可选仅做 argv 和网络策略检查，隔离后的 Agent 工具入口固定走文件系统与网络隔离。
+默认权限策略允许安全路径的读取，对写操作和命令返回 `ASK_HUMAN`，交由 CLI 确认。单独使用 `CommandRunner` 的旧接口可选仅做 argv 和网络策略检查，隔离后的 Agent 工具入口固定走文件系统与网络隔离。
 
 ## 再往下读
 

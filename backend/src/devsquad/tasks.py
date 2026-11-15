@@ -21,12 +21,15 @@ import os
 import re
 import sqlite3
 import subprocess
+import sys
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 from devsquad.db import connect
+from devsquad.sandbox.runner import looks_like_secret_env
 
 _TASK_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 _BRANCH_RE = re.compile(r"^devsquad/[0-9a-f]{12}$")
@@ -66,6 +69,26 @@ def new_task_id() -> str:
     return uuid.uuid4().hex[:12]
 
 
+@contextmanager
+def execution_lease(db_path: Path, task_id: str):
+    """Exclusive local lease released by the kernel on process exit."""
+    if sys.platform != "linux" or not _TASK_ID_RE.fullmatch(task_id):
+        raise TaskError("cannot acquire the model execution lease")
+    from fcntl import LOCK_EX, LOCK_NB, flock
+
+    directory = Path(db_path).resolve().parent / "execution-leases"
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(directory / task_id, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        try:
+            flock(fd, LOCK_EX | LOCK_NB)
+        except BlockingIOError as exc:
+            raise TaskError(f"task is running: {task_id}") from exc
+        yield
+    finally:
+        os.close(fd)
+
+
 def create_task(
     *,
     repo: Path,
@@ -73,6 +96,7 @@ def create_task(
     workspaces_dir: Path,
     db_path: Path,
     task_id: str | None = None,
+    executing: bool = False,
 ) -> Task:
     """Add a worktree on a new branch and insert the task row.
 
@@ -99,7 +123,7 @@ def create_task(
     if worktree.exists():
         raise TaskError(f"worktree path already exists: {worktree}")
 
-    git(repo_root, "worktree", "add", "-b", branch, str(worktree), "HEAD")
+    git(repo_root, "worktree", "add", "-b", branch, str(worktree), base_commit)
     if not worktree.is_dir():
         raise TaskError(f"git did not create the worktree: {worktree}")
 
@@ -108,7 +132,7 @@ def create_task(
         repo_path=str(repo_root),
         branch=branch,
         worktree_path=str(worktree),
-        status="created",
+        status="running" if executing else "created",
         created_at=datetime.now(UTC).isoformat(),
         title=cleaned_title,
         base_commit=base_commit,
@@ -138,6 +162,14 @@ def cleanup_task(*, task_id: str, db_path: Path, force: bool = False) -> Task:
         raise TaskError(f"unknown task: {task_id}")
     if task.status == "cleaned":
         raise TaskError(f"task already cleaned: {task_id}")
+    if task.status == "running":
+        # A run that vanished can be recovered after its OS lease is released.
+        with execution_lease(db_path, task_id):
+            task = store.get(task_id)
+            if task is None or task.status == "cleaned":
+                raise TaskError(f"task no longer available: {task_id}")
+            if task.status == "running":
+                store.finish_execution(task_id, "interrupted")
 
     _assert_removable(task)
     repo = Path(task.repo_path)
@@ -220,6 +252,18 @@ class TaskStore:
             conn.close()
         return [_row_to_task(row) for row in rows]
 
+    def finish_execution(self, task_id: str, status: str) -> None:
+        conn = connect(self.db_path)
+        try:
+            cur = conn.execute(
+                "UPDATE tasks SET status = ? WHERE id = ? AND status = 'running'",
+                (status, task_id),
+            )
+            if cur.rowcount != 1:
+                raise TaskError(f"task is not running: {task_id}")
+        finally:
+            conn.close()
+
     def mark_cleaned(self, task_id: str) -> None:
         conn = connect(self.db_path)
         try:
@@ -255,7 +299,7 @@ def git(
 
 
 def _git_env() -> dict[str, str]:
-    env = os.environ.copy()
+    env = {key: value for key, value in os.environ.items() if not looks_like_secret_env(key)}
     # Never open a credential prompt from the control plane.
     env["GIT_TERMINAL_PROMPT"] = "0"
     return env
@@ -345,6 +389,7 @@ def _rollback_worktree(repo: Path, worktree: Path, branch: str) -> None:
         check=False,
         capture_output=True,
         text=True,
+        env=_git_env(),
     )
     subprocess.run(
         ["git", "branch", "-D", branch],
@@ -352,6 +397,7 @@ def _rollback_worktree(repo: Path, worktree: Path, branch: str) -> None:
         check=False,
         capture_output=True,
         text=True,
+        env=_git_env(),
     )
 
 

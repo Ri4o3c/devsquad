@@ -85,6 +85,7 @@ def run_loop(
     planner_config: PlannerConfig | None = None,
     trace_recorder: TraceRecorder | None = None,
     task_id: str | None = None,
+    approve: Callable[[str, dict], bool | None] | None = None,
 ) -> LoopResult:
     """运行共享编码循环，开启规划时先生成计划并注入上下文。
 
@@ -125,6 +126,7 @@ def run_loop(
         max_steps=max_steps, max_cost_usd=max_cost_usd,
         repo_root=repo_root if repo_root is not None else Path.cwd(),
         trace_recorder=trace_recorder, task_id=task_id,
+        approve=approve,
     )
 
 
@@ -136,6 +138,7 @@ def _run_coding_loop(
     *, messages: list[dict], model: object, tools: dict[str, Callable],
     permissions: object, max_steps: int, max_cost_usd: float,
     repo_root: str | Path, trace_recorder: TraceRecorder | None, task_id: str | None,
+    approve: Callable[[str, dict], bool | None] | None = None,
 ) -> LoopResult:
     """编码阶段沿用原接口约定，限制步数、费用并检查工具权限。"""
     steps = 0
@@ -195,8 +198,15 @@ def _run_coding_loop(
             record("tool.rejected", tool_name=name, reason="permission_denied")
             return result("denied")
         if decision == Decision.ASK_HUMAN:
-            record("tool.rejected", tool_name=name, reason="ask_human")
-            return result("ask_human")
+            approved = approve(name, args) if approve is not None else None
+            if approved is None:
+                record("tool.rejected", tool_name=name, reason="ask_human")
+                return result("ask_human")
+            record("tool.approval", tool_name=name, step=steps, approved=approved is True)
+            if approved is not True:
+                messages.append({"role": "tool", "name": name, "content": "Operator declined."})
+                continue
+            decision = Decision.ALLOW
         if decision != Decision.ALLOW:
             record("tool.rejected", tool_name=name, reason="invalid_decision")
             return result("error")
