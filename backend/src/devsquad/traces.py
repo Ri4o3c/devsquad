@@ -32,11 +32,11 @@ class TraceEvent:
 _DISPLAY_EVENTS = frozenset({
     "run.started", "run.retrieval", "run.plan", "run.plan.error",
     "model.started", "model.completed", "model.error",
-    "tool.started", "tool.completed", "tool.rejected", "tool.error", "loop.result",
+    "tool.started", "tool.completed", "tool.rejected", "tool.error", "tool.approval", "loop.result",
 })
 _DISPLAY_NUMBERS = frozenset({
     "step", "steps", "cost_usd", "duration_ms", "hit_count", "returncode",
-    "input_tokens", "output_tokens", "retrieval_failed", "planner_enabled", "timed_out",
+    "input_tokens", "output_tokens", "retrieval_failed", "planner_enabled", "timed_out", "approved",
 })
 _DISPLAY_STATUS = frozenset({
     "completed", "step_limit", "cost_limit", "denied", "ask_human", "error",

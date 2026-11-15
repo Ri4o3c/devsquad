@@ -88,7 +88,7 @@ def test_run_creates_worktree_outside_repo_and_records_row(
     assert result.exit_code == 0, _text(result)
     info = _parse_kv(result.stdout)
     assert info["agent_execution"] == "deferred"
-    assert "later PR" in info["message"]
+    assert "--model" in info["message"]
     assert info["branch"] == f"devsquad/{info['task_id']}"
     assert info["status"] == "created"
     assert info["title"] == "cover the empty input"
