@@ -16,9 +16,8 @@ caller asked for and at the path it resolves to, so either a file named
 ``.env`` or a harmless name that links to ``id_rsa`` is denied.
 
 This is not a kernel sandbox. It protects paths DevSquad checks before
-using them. A child process can still ``open()`` an absolute path; that
-gap belongs with the command runner's network TODO, not with a fake check
-here. There is also a time-of-check/time-of-use window between ``resolve``
+using them. Agent commands use a separate filesystem sandbox. There is
+still a time-of-check/time-of-use window between ``resolve``
 and the later ``open``.
 """
 
@@ -46,6 +45,12 @@ _SECRET_ALLOW = frozenset({
     ".env.example",
     ".env.sample",
     ".env.template",
+})
+
+
+_SECRET_NAMES = frozenset({
+    ".aws", ".azure", ".codex", ".docker", ".git-credentials", ".gnupg",
+    ".kube", ".netrc", ".npmrc", ".pypirc", ".ssh",
 })
 
 
@@ -128,7 +133,9 @@ def is_secret_filename(name: str) -> bool:
     lowered = name.lower()
     if lowered in _SECRET_ALLOW:
         return False
-    return any(fnmatch.fnmatchcase(lowered, pattern) for pattern in _SECRET_GLOBS)
+    return lowered in _SECRET_NAMES or any(
+        fnmatch.fnmatchcase(lowered, pattern) for pattern in _SECRET_GLOBS
+    )
 
 
 class PathGuard:
@@ -176,6 +183,14 @@ class PathGuard:
         resolved = self._resolve_inside(self._candidate(raw))
         if self._touches_git(raw, resolved):
             raise GitWriteError(f"writing inside .git is denied: {path}")
+        return resolved
+
+    def check_tool_write(self, path: str | Path) -> Path:
+        """Apply both workspace containment and the agent tool's secret-name policy."""
+        raw = Path(path)
+        resolved = self.check_write(raw)
+        if self._touches_secret(raw, resolved):
+            raise SecretPathError(f"writing secret file is denied: {path}")
         return resolved
 
     def _candidate(self, raw: Path) -> Path:

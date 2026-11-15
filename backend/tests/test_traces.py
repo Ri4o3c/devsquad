@@ -7,7 +7,9 @@ import sqlite3
 from datetime import datetime
 
 import pytest
+from typer.testing import CliRunner
 
+from devsquad.cli import app
 from devsquad.db import connect, init_db
 from devsquad.tasks import create_task
 from devsquad.traces import TraceRecorder
@@ -108,3 +110,17 @@ def test_blank_event_type_and_non_dict_payload_are_rejected(task_id) -> None:
 
 def test_list_unknown_task_is_empty(tmp_path) -> None:
     assert TraceRecorder(tmp_path / "devsquad.db").list_events("missing") == []
+
+
+def test_trace_cli_filters_legacy_payload(task_id, monkeypatch) -> None:
+    tid, db = task_id
+    recorder = TraceRecorder(db)
+    recorder.record(tid, "run.plan", {"plan": "fixture-only-private-text", "duration_ms": 12})
+    recorder.record(tid, "loop.result", {"status": "completed", "steps": 1})
+    monkeypatch.setenv("DEVSQUAD_DB", str(db))
+    result = CliRunner().invoke(app, ["trace", tid])
+    assert result.exit_code == 0
+    assert result.stdout.splitlines() == [
+        '1\trun.plan\t{"duration_ms": 12}',
+        '2\tloop.result\t{"status": "completed", "steps": 1}',
+    ]

@@ -32,6 +32,7 @@ from devsquad.tasks import (
     create_task,
     format_task_line,
 )
+from devsquad.traces import TraceRecorder, trace_summary
 
 app = typer.Typer(
     add_completion=False,
@@ -123,6 +124,22 @@ def run_command(
         raise typer.Exit(code=1) from exc
     _echo_task(created)
     typer.echo("message: agent execution comes in a later PR")
+
+
+@app.command("trace")
+def trace_command(
+    task_id: Annotated[str, typer.Argument(help="Task id printed by devsquad run.")],
+) -> None:
+    """Display the ordered run events and their operational metadata."""
+    path = db_path()
+    if TaskStore(path).get(task_id) is None:
+        typer.echo("error: task not found", err=True)
+        raise typer.Exit(code=1)
+    events = TraceRecorder(path).list_events(task_id)
+    if not events:
+        typer.echo("(no trace events)")
+    for event in events:
+        typer.echo(trace_summary(event))
 
 
 def main() -> None:
