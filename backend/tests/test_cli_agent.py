@@ -13,7 +13,7 @@ import pytest
 from typer.testing import CliRunner
 
 from devsquad import cli
-from devsquad.tasks import TaskError, TaskStore, cleanup_task
+from devsquad.tasks import TaskError, TaskStore, cleanup_task, git
 from devsquad.traces import TraceRecorder
 
 pytestmark = pytest.mark.skipif(
@@ -152,3 +152,70 @@ def test_approved_command_uses_the_isolated_worktree(git_repo, cli_env, monkeypa
     trace = TraceRecorder(cli_env["db"]).list_events(task.id)
     done, = [event for event in trace if event.event_type == "tool.completed"]
     assert done.payload["returncode"] == 0
+
+
+def test_search_and_test_results_return_to_the_model(git_repo, cli_env, monkeypatch):
+    binary = Path(os.environ.get("DEVSQUAD_BWRAP", "/usr/bin/bwrap"))
+    if not binary.is_file():
+        pytest.skip("requires an installed Bubblewrap launcher")
+    tests = git_repo / "tests"
+    tests.mkdir()
+    (tests / "test_greeting.py").write_text(
+        "from pathlib import Path\n"
+        "from unittest import TestCase\n\n"
+        "class GreetingTest(TestCase):\n"
+        "    def test_fixture_lookup(self):\n"
+        "        self.assertFalse(Path('.env').exists())\n"
+        "        self.fail('expected test failure')\n",
+        encoding="utf-8",
+    )
+    (tests / ".env").write_text("fixture_lookup PRIVATE_FIXTURE_VALUE\n", encoding="utf-8")
+    (git_repo / ".gitignore").write_text("tests/ignored.py\n", encoding="utf-8")
+    (tests / "ignored.py").write_text("# fixture_lookup ignored\n", encoding="utf-8")
+    git(git_repo, "add", "--", ".gitignore", "tests/test_greeting.py")
+    git(git_repo, "add", "-f", "--", "tests/.env", "tests/ignored.py")
+    git(git_repo, "-c", "commit.gpgsign=false", "commit", "-qm", "test fixture")
+    provider = ScriptedProvider([
+        {"tool_name": "search", "tool_args": {"query": "fixture_lookup", "path": "tests"}},
+        {"tool_name": "run_tests", "tool_args": {"cwd": "tests"}},
+        {"tool_name": "run_tests", "tool_args": {
+            "cwd": "tests", "argv": ["python3", "-m", "unittest"], "files": ["test_greeting.py"],
+        }},
+        {"final_text": "The test reported a failure."},
+    ])
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "fixture-provider-key")
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *_: provider)
+    previews = []
+
+    def confirm(name, args):
+        previews.append((name, args))
+        return len(previews) == 2
+
+    monkeypatch.setattr(cli, "_confirm_tool", confirm)
+    result = _run(git_repo)
+    assert result.exit_code == 0, result.output
+    assert previews == [
+        ("run_tests", {
+            "cwd": "tests", "argv": ["python3", "-m", "pytest", "-p", "no:cacheprovider"],
+        }),
+        ("run_tests", {
+            "cwd": "tests", "argv": ["python3", "-m", "unittest", "--", "./test_greeting.py"],
+        }),
+    ]
+    search, refused, completed = [
+        json.loads(turn["messages"][-1]["content"])["untrusted_data"]
+        for turn in provider.requests[1:]
+    ]
+    assert "tests/test_greeting.py:" in search
+    assert "PRIVATE_FIXTURE_VALUE" not in search
+    assert "ignored.py" not in search
+    assert refused == "Operator declined."
+    assert "Exit code: 1" in completed
+    assert "expected test failure" in completed
+    assert git(git_repo, "status", "--porcelain").stdout == ""
+    task, = TaskStore(cli_env["db"]).list_tasks()
+    events = TraceRecorder(cli_env["db"]).list_events(task.id)
+    found, tested = [event.payload for event in events if event.event_type == "tool.completed"]
+    assert found["tool_name"] == "search" and found["hit_count"] == 1
+    assert tested["tool_name"] == "run_tests" and tested["returncode"] == 1
+    assert "PRIVATE_FIXTURE_VALUE" not in str(events)

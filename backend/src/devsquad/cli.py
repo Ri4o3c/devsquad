@@ -28,7 +28,7 @@ from typing import Annotated
 import typer
 
 from devsquad.agent.deepseek import MODEL, DeepSeekModel, ModelError
-from devsquad.agent.loop import run_loop
+from devsquad.agent.session import execute_task
 from devsquad.config import db_path, workspaces_dir
 from devsquad.sandbox.pathguard import SandboxError
 from devsquad.tasks import (
@@ -41,8 +41,6 @@ from devsquad.tasks import (
     format_task_line,
     new_task_id,
 )
-from devsquad.tools.permissions import PermissionPolicy
-from devsquad.tools.worktree import WorktreeFiles
 from devsquad.traces import TraceRecorder, trace_summary
 
 app = typer.Typer(
@@ -167,61 +165,27 @@ def _confirm_tool(name: str, args: dict) -> bool | None:
     if not sys.stdin.isatty() or not sys.stderr.isatty():
         return None
     typer.echo(json.dumps({"tool": name, "arguments": args}, indent=2), err=True)
-    return typer.confirm("Allow this tool call once?", default=False, err=True)
+    try:
+        return typer.confirm("Allow this tool call once?", default=False, err=True)
+    except typer.Abort:
+        raise KeyboardInterrupt from None
 
 
 def _execute_task(
     task: Task, database: Path, provider: DeepSeekModel, max_steps: int, budget: float,
 ) -> None:
-    root = Path(task.worktree_path)
-    files = None
-    status = "error"
     try:
-        files = WorktreeFiles(root)
-        tools = {
-            "list_dir": files.list_dir, "read_file": files.read_file,
-            "edit_file": files.edit_file, "write_file": files.write_file,
-            "run_command": None,  # Executed by the sandbox dispatcher.
-        }
-
-        def approve(name: str, args: dict) -> bool | None:
-            preview = dict(args)
-            files.approved = None
-            try:
-                if name in {"write_file", "edit_file"}:
-                    change = files.prepare(name, args)
-                    preview["path"] = change.path.relative_to(files.guard.root).as_posix()
-                else:
-                    cwd = files.guard.check_read(args.get("cwd", "."))
-                    preview["cwd"] = cwd.relative_to(files.guard.root).as_posix()
-            except (OSError, ValueError, SandboxError):
-                typer.echo("The requested tool cannot be safely prepared.", err=True)
-                return False
-            answer = _confirm_tool(name, preview)
-            if answer is True:
-                if name in {"write_file", "edit_file"}:
-                    files.approved = change
-                else:
-                    args["cwd"] = preview["cwd"]
-            return answer
-
-        result = run_loop(
-            task=task.title, model=provider, tools=tools, permissions=PermissionPolicy(root),
-            max_steps=max_steps, max_cost_usd=budget, repo_root=root,
-            trace_recorder=TraceRecorder(database), task_id=task.id, approve=approve,
-        )
-        status = result.status
-        typer.echo(f"result: {status}")
+        result = execute_task(task, database, provider, max_steps, budget, _confirm_tool)
+        typer.echo(f"result: {result.status}")
         typer.echo(f"steps: {result.steps}")
         typer.echo(f"estimated_cost_usd: {result.cost_usd:.6f}")
         if result.final_text:
             typer.echo("final_text: " + json.dumps(provider.redact(result.final_text)))
-        if status == "ask_human":
+        if result.status == "ask_human":
             typer.echo("Tool approval requires an interactive terminal.", err=True)
-        if status != "completed":
+        if result.status != "completed":
             raise typer.Exit(code=1)
-    except (KeyboardInterrupt, typer.Abort):
-        status = "interrupted"
+    except KeyboardInterrupt:
         typer.echo("Execution interrupted.", err=True)
         raise typer.Exit(code=130) from None
     except ModelError as exc:
@@ -230,10 +194,21 @@ def _execute_task(
     except (OSError, SandboxError):
         typer.echo("error: could not access the execution worktree", err=True)
         raise typer.Exit(code=1) from None
-    finally:
-        if files is not None:
-            files.close()
-        TaskStore(database).finish_execution(task.id, status)
+
+
+@app.command("serve")
+def serve_command(
+    web_root: Annotated[Path, typer.Option("--web-root", help="Built Vue frontend directory.")],
+    port: Annotated[int, typer.Option("--port", min=1, max=65535)] = 8765,
+) -> None:
+    """Serve the local browser workspace and API."""
+    from devsquad.server import serve
+
+    try:
+        serve(port, web_root=web_root)
+    except ValueError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from None
 
 
 @app.command("trace")

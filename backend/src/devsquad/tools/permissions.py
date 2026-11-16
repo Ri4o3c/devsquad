@@ -14,9 +14,9 @@ from pathlib import Path
 
 from devsquad.sandbox.pathguard import PathGuard, SandboxError
 
-READ_TOOLS = frozenset({"read_file", "list_dir", "grep"})
+READ_TOOLS = frozenset({"read_file", "list_dir", "grep", "search"})
 WRITE_TOOLS = frozenset({"write_file", "edit_file"})
-COMMAND_TOOLS = frozenset({"run_command"})
+COMMAND_TOOLS = frozenset({"run_command", "run_tests"})
 NETWORK_TOOLS = frozenset({"http_get", "http_post"})
 
 
@@ -47,8 +47,8 @@ class PermissionPolicy:
         * 工具名在 ``deny_tools`` 里 → ``DENY``，哪怕别的规则会允许。
         * ``http_get`` 或 ``http_post`` → ``DENY``。
         * 名字不在上面的读、写、命令集合里 → ``DENY``。
-        * ``read_file``、``list_dir``、``grep``：
-          - ``list_dir`` 没有 ``path``，表示 worktree 根目录 → ``ALLOW``。
+        * ``read_file``、``list_dir``、``grep``、``search``：
+          - ``list_dir``、``search`` 没有 ``path``，表示 worktree 根目录 → ``ALLOW``。
           - 否则 ``arguments["path"]`` 必须通过 ``PathGuard.check_read``。
             成功 → ``ALLOW``。``PathEscapeError`` 或 ``SecretPathError``
             → ``DENY``。``read_file`` 或 ``grep`` 缺少 ``path`` →
@@ -61,7 +61,7 @@ class PermissionPolicy:
             ``DENY``。``check_write`` 本身不做密钥检查；这条规则由本策略
             负责，所以创建 ``.env`` 是拒绝，而不是询问。
           - 否则 → ``ASK_HUMAN``。写操作不要返回 ``ALLOW``。
-        * ``run_command``：
+        * ``run_command``、``run_tests``：
           - 没有 ``cwd``，或者 ``cwd`` 通过 ``check_read`` 并且是 worktree
             里的目录 → ``ASK_HUMAN``。
           - ``cwd`` 逃出 worktree、不是目录、或是密钥 → ``DENY``。
@@ -86,7 +86,7 @@ class PermissionPolicy:
                     return Decision.ASK_HUMAN
                 return Decision.DENY
 
-            path = arguments.get("path", "." if tool_name == "list_dir" else None)
+            path = arguments.get("path", "." if tool_name in {"list_dir", "search"} else None)
             if not isinstance(path, (str, Path)) or not path:
                 return Decision.DENY
             if tool_name in WRITE_TOOLS:
