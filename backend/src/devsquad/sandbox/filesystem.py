@@ -44,7 +44,7 @@ def _bubblewrap(root: Path) -> Path:
     return binary
 
 
-def _copy_source(root: Path, destination: Path) -> None:
+def _copy_source(root: Path | int, destination: Path) -> None:
     # Open relative to directory descriptors, without following links even if an
     # entry is replaced after enumeration. Never open protected names for reading.
     dir_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY
@@ -96,7 +96,9 @@ def _copy_source(root: Path, destination: Path) -> None:
                 finally:
                     os.close(handle)
 
-    directory = os.open(root, dir_flags)
+    directory = (
+        os.open(".", dir_flags, dir_fd=root) if isinstance(root, int) else os.open(root, dir_flags)
+    )
     try:
         copy_dir(directory, destination, os.fstat(directory).st_dev, 0)
     finally:
@@ -104,17 +106,24 @@ def _copy_source(root: Path, destination: Path) -> None:
 
 
 @contextmanager
-def isolated_command(root: Path, cwd: Path, argv: list[str]) -> Iterator[list[str]]:
-    """Mount a read-only snapshot with an isolated network and private /tmp."""
-    binary = _bubblewrap(root)
-    relative_cwd = cwd.relative_to(root)
-    with TemporaryDirectory(prefix="devsquad-command-") as directory:
+def source_snapshot(root: Path | int) -> Iterator[Path]:
+    """Copy bounded source without following links or including protected files."""
+    with TemporaryDirectory(prefix="devsquad-source-") as directory:
         snapshot = Path(directory) / "source"
         snapshot.mkdir()
         try:
             _copy_source(root, snapshot)
         except OSError as exc:
-            raise SandboxError("无法安全创建工作区快照，已拒绝启动命令") from exc
+            raise SandboxError("无法安全创建工作区快照") from exc
+        yield snapshot
+
+
+@contextmanager
+def isolated_command(root: Path, cwd: Path, argv: list[str]) -> Iterator[list[str]]:
+    """Mount a read-only snapshot with an isolated network and private /tmp."""
+    binary = _bubblewrap(root)
+    relative_cwd = cwd.relative_to(root)
+    with source_snapshot(root) as snapshot:
         if not (snapshot / relative_cwd).is_dir():
             raise SandboxError("cwd 不在隔离快照内")
 

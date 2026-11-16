@@ -15,6 +15,7 @@ from pathlib import Path
 
 from devsquad.retrieval.bm25 import BM25Index, Chunk, tokenize
 from devsquad.sandbox.pathguard import is_secret_filename
+from devsquad.sandbox.runner import minimal_env
 
 
 @dataclass(frozen=True)
@@ -200,6 +201,7 @@ def search_code(
     top_k: int = 8,
     backend: str = "auto",
     max_file_bytes: int = 1_000_000,
+    directory: Path = Path("."),
 ) -> list[SearchHit]:
     """召回文件后对完整代码块做 BM25；中文需求请先改写 keywords。"""
     if top_k < 1:
@@ -215,6 +217,9 @@ def search_code(
         return []
     root = Path(root).resolve(strict=True)
     filters = _PathFilter(root, max_file_bytes)
+    scope = (root / directory).resolve(strict=True)
+    if scope != root and not filters.allowed(scope, is_dir=True):
+        return []
     if executable:
         # rg 自行遍历，只启用仓库内的 .gitignore；返回路径仍需经过共用过滤。
         argv = [
@@ -237,16 +242,17 @@ def search_code(
         for word in words:
             argv.extend(["-e", word])
         result = subprocess.run(
-            argv + ["--", str(root)],
+            argv + ["--", str(scope)],
             capture_output=True,
             timeout=30,
             check=False,
+            env=minimal_env(),
         )
         if result.returncode not in (0, 1):
             raise RuntimeError(f"ripgrep 检索失败：{os.fsdecode(result.stderr)}")
         candidates = {Path(os.fsdecode(p)) for p in result.stdout.split(b"\0") if p}
     else:
-        candidates = _files(root, filters)
+        candidates = _files(scope, filters)
     index = BM25Index()
     hits = {}
     for path in sorted(candidates):

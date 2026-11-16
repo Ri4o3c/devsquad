@@ -15,6 +15,7 @@ from math import isfinite
 from pathlib import Path
 
 from devsquad.db import connect
+from devsquad.tools.permissions import COMMAND_TOOLS, READ_TOOLS, WRITE_TOOLS
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,7 @@ _DISPLAY_EVENTS = frozenset({
     "model.started", "model.completed", "model.error",
     "tool.started", "tool.completed", "tool.rejected", "tool.error", "tool.approval", "loop.result",
 })
+_DISPLAY_TOOLS = COMMAND_TOOLS | READ_TOOLS | WRITE_TOOLS
 _DISPLAY_NUMBERS = frozenset({
     "step", "steps", "cost_usd", "duration_ms", "hit_count", "returncode",
     "input_tokens", "output_tokens", "retrieval_failed", "planner_enabled", "timed_out", "approved",
@@ -60,6 +62,9 @@ def trace_summary(event: TraceEvent) -> str:
         value = event.payload.get(key)
         if isinstance(value, str) and value in choices:
             details[key] = value
+    tool = event.payload.get("tool_name")
+    if isinstance(tool, str) and tool in _DISPLAY_TOOLS:
+        details["tool_name"] = tool
     return f"{event.seq}\t{event.event_type}\t{json.dumps(details, sort_keys=True)}"
 
 

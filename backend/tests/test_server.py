@@ -95,7 +95,7 @@ def test_docs_are_not_a_public_page(monkeypatch) -> None:
 def test_serve_binds_loopback_only(monkeypatch) -> None:
     captured: dict = {}
 
-    def fake_run(target, host, port, log_level="info"):
+    def fake_run(target, host, port, **options):
         captured["app"] = target
         captured["host"] = host
         captured["port"] = port

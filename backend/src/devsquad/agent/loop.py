@@ -24,10 +24,12 @@ from pathlib import Path
 from time import monotonic
 from typing import TYPE_CHECKING
 
+from devsquad.attachments import TaskAttachment
 from devsquad.sandbox.pathguard import SandboxError
 from devsquad.sandbox.runner import RunResult
 from devsquad.tools.permissions import Decision
 from devsquad.tools.sandbox import dispatch_tool
+from devsquad.tools.worktree import SearchResult
 
 if TYPE_CHECKING:
     from devsquad.agent.planner import PlannerConfig, PlannerModel
@@ -86,6 +88,7 @@ def run_loop(
     trace_recorder: TraceRecorder | None = None,
     task_id: str | None = None,
     approve: Callable[[str, dict], bool | None] | None = None,
+    attachments: tuple[TaskAttachment, ...] = (),
 ) -> LoopResult:
     """运行共享编码循环，开启规划时先生成计划并注入上下文。
 
@@ -96,6 +99,8 @@ def run_loop(
     if not (max_steps >= 1 and max_cost_usd >= 0):
         raise ValueError("步数上限必须为正数，费用上限不能为负")
     messages = [{"role": "user", "content": task}]
+    if attachments:
+        messages.append({"role": "user", "attachments": attachments})
     if planner_enabled and (repo_root is None or planner_model is None
                             or trace_recorder is None or not task_id):
         raise ValueError("开启 Planner 必须提供仓库、规划模型、记录器和任务 ID")
@@ -223,8 +228,21 @@ def _run_coding_loop(
             messages.append({"role": "tool", "name": name, "content": "工具执行失败"})
             return result("error")
         details = _elapsed(started)
+        text = str(value)
         if isinstance(value, RunResult):
             details.update(returncode=value.returncode, timed_out=value.timed_out)
+            if name == "run_tests":
+                stdout = value.stdout.decode("utf-8", errors="replace")
+                stderr = value.stderr.decode("utf-8", errors="replace")
+                clipped = value.truncated or max(len(stdout), len(stderr)) > 2000
+                text = (
+                    f"Exit code: {value.returncode}; timed out: {value.timed_out}; "
+                    f"output truncated: {clipped}\n"
+                    f"stdout:\n{stdout[-2000:]}\nstderr:\n{stderr[-2000:]}"
+                )
+        elif isinstance(value, SearchResult):
+            details["hit_count"] = value.hit_count
+            text = value.text
         record("tool.completed", step=steps, tool_name=name, **details)
-        messages.append({"role": "tool", "name": name, "content": str(value)})
+        messages.append({"role": "tool", "name": name, "content": text})
     return result("step_limit")

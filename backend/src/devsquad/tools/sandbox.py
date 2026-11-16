@@ -23,8 +23,10 @@ def dispatch_tool(
             runner = CommandRunner(
                 guard.root, require_network_isolation=True, require_filesystem_isolation=True,
             )
+            if name == "run_tests":
+                guarded["args"] = guarded.pop("argv")
             return runner.run(**guarded)
-        path = guarded.get("path", "." if name == "list_dir" else None)
+        path = guarded.get("path", "." if name in {"list_dir", "search"} else None)
         if path is None:
             raise SandboxError("缺少工具路径")
         if name in WRITE_TOOLS:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 from contextlib import contextmanager
@@ -9,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
+from devsquad.retrieval.code_search import search_code
+from devsquad.sandbox.filesystem import source_snapshot
 from devsquad.sandbox.pathguard import PathGuard, SandboxError, is_secret_filename
 
 _MAX_FILE = 64 * 1024
@@ -23,6 +26,12 @@ class FileChange:
     path: Path
     before: tuple[bytes, int, int] | None
     after: bytes
+
+
+@dataclass(frozen=True)
+class SearchResult:
+    hit_count: int
+    text: str
 
 
 class WorktreeFiles:
@@ -89,6 +98,47 @@ class WorktreeFiles:
         with self._directory(relative.parent) as directory:
             data, _, _ = self._read_at(directory, relative.name)
         return data.decode("utf-8")
+
+    def search(self, path: str, query: str) -> SearchResult:
+        directory = self._relative(Path(path))
+        if not isinstance(query, str) or not query.strip() or len(query) > 256:
+            raise SandboxError("Search requires a query of 1 to 256 characters")
+        with source_snapshot(self._root) as snapshot:
+            scope = snapshot / directory
+            if not scope.is_dir():
+                raise SandboxError("The search path must be a workspace directory")
+            hits = search_code(
+                snapshot, query, top_k=4, max_file_bytes=_MAX_FILE, directory=directory,
+            )
+        blocks = [
+            f"{hit.path}:{hit.start_line}-{hit.end_line}\n{hit.snippet[:900]}"
+            for hit in hits
+        ]
+        return SearchResult(len(hits), "\n\n".join(blocks) if blocks else "No matching code found.")
+
+    def test_argv(
+        self, cwd: Path, argv: list[str] | None, files: list[str] | None,
+    ) -> list[str]:
+        """Resolve the exact test invocation before presenting it for approval."""
+        command = list(argv) if argv is not None else self._default_test_argv(cwd)
+        if not files:
+            return command
+        targets = []
+        for path in files:
+            selected = self.guard.check_read(cwd / path)
+            self._relative(selected)
+            targets.append("./" + selected.relative_to(cwd).as_posix())
+        return [*command, "--", *targets]
+
+    def _default_test_argv(self, cwd: Path) -> list[str]:
+        try:
+            manifest = json.loads(self.read_file(str(cwd / "package.json")))
+        except (OSError, ValueError, SandboxError):
+            manifest = None
+        scripts = manifest.get("scripts") if isinstance(manifest, dict) else None
+        if isinstance(scripts, dict) and isinstance(scripts.get("test"), str) and scripts["test"]:
+            return ["npm", "test"]
+        return ["python3", "-m", "pytest", "-p", "no:cacheprovider"]
 
     def prepare(self, name: str, args: dict) -> FileChange:
         path = self.guard.check_tool_write(args["path"])
