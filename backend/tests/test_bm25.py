@@ -1,10 +1,6 @@
 """``BM25Index`` 的验收题目（测试规格）。
 
 下面的数字都是按 ``devsquad/retrieval/bm25.py`` 开头的公式算出来的。
-在你实现那个模块之前，这些测试都会失败。``xfail(strict=False)`` 的作用是
-让 CI 在你写完之前仍然保持绿色。
-
-    pytest -m student --runxfail tests/test_bm25.py
 
 排序类测试用的语料：
 
@@ -30,14 +26,6 @@ from __future__ import annotations
 import pytest
 
 from devsquad.retrieval.bm25 import BM25Index, Chunk
-
-pytestmark = [
-    pytest.mark.student,
-    pytest.mark.xfail(
-        reason="学生待办：实现 BM25Index.add 和 BM25Index.search",
-        strict=False,
-    ),
-]
 
 
 # 辅助函数：用上面三篇文档 d1、d2、d3 建一个索引。

@@ -1,10 +1,9 @@
 """对代码片段（chunk）做 BM25 检索。
 
-状态：已实现。
 测试：``backend/tests/test_bm25.py``
 运行测试::
 
-    pytest -m student --runxfail tests/test_bm25.py
+    pytest tests/test_bm25.py
 
 测试会核对具体数字，而不只是排序，所以下面的公式是"合同"的一部分，必须照着写。
 

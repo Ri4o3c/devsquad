@@ -1,7 +1,7 @@
 [project]
 name = "devsquad"
 version = "0.1.0"
-description = "Desktop multi-agent coding workbench — phase 1 skeleton"
+description = "Local coding workbench with isolated Git tasks"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115.0",
@@ -41,6 +41,3 @@ known-first-party = ["devsquad", "tests"]
 testpaths = ["tests"]
 pythonpath = [".", "src"]
 addopts = "-ra"
-markers = [
-    "student: owner-implemented modules; expected to fail until the TODO is done",
-]
