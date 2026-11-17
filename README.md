@@ -137,17 +137,11 @@ ruff check .
 pytest
 ```
 
-权限决策测试按普通用例执行。以下命令也可让曾标记 `xfail` 的学生用例按普通测试执行。
-
-```bash
-pytest -m student --runxfail
-```
-
 | 模块 | 文件 | 测试 |
 | --- | --- | --- |
-| Agent 主循环（步数上限、费用上限、工具分发） | `backend/src/devsquad/agent/loop.py` | `pytest -m student --runxfail tests/test_agent_loop.py` |
-| 工具权限（allow / ask-human / deny） | `backend/src/devsquad/tools/permissions.py` | `pytest -m student --runxfail tests/test_permissions.py` |
-| BM25 | `backend/src/devsquad/retrieval/bm25.py` | `pytest -m student --runxfail tests/test_bm25.py` |
+| Agent 主循环（步数上限、费用上限、工具分发） | `backend/src/devsquad/agent/loop.py` | `pytest tests/test_agent_loop.py` |
+| 工具权限（allow / ask-human / deny） | `backend/src/devsquad/tools/permissions.py` | `pytest tests/test_permissions.py` |
+| BM25 | `backend/src/devsquad/retrieval/bm25.py` | `pytest tests/test_bm25.py` |
 
 接口文件里的 docstring 写了预期行为，测试是规格。
 
@@ -165,5 +159,6 @@ Agent 的 `run_command` 要求支持用户命名空间的 Linux 和新版 Bubble
 
 ## 再往下读
 
-- 隔离工作区为什么这样设计：`docs/adr/0001-worktree-isolation.md`
-- 这一 PR 的短笔记：`docs/learning/pr01-skeleton-worktree-sandbox.md`
+- [Git worktree 隔离的架构决策](docs/adr/0001-worktree-isolation.md)
+- [BM25 检索原理与计算示例](docs/learning/bm25-intro.md)
+- [项目设计](docs/design.md)

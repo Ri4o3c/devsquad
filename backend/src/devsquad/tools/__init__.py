@@ -1,7 +1,4 @@
-"""Tool policy interfaces.
-
-``permissions.PermissionPolicy.check`` is a student TODO.
-"""
+"""Tool policy and permission interfaces."""
 
 from devsquad.tools.permissions import (
     COMMAND_TOOLS,

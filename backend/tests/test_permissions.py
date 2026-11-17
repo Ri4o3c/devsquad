@@ -4,11 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from devsquad.tools.permissions import Decision, PermissionPolicy
-
-pytestmark = pytest.mark.student
 
 
 def _policy(root: Path, deny_tools: set[str] | None = None) -> PermissionPolicy:
